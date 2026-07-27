@@ -195,7 +195,8 @@ def run_linear_probe(
         verbose: Print a one-line summary.
 
     Returns:
-        The test accuracy, the best validation accuracy, the best epoch and the history.
+        The test accuracy, the best validation accuracy, the best epoch, the per-epoch
+        history and the test-set predictions.
     """
     device = device if device is not None else default_device()
     num_classes = get_spec(dataset).num_classes
@@ -218,6 +219,9 @@ def run_linear_probe(
     criterion = nn.CrossEntropyLoss()
     _, test_accuracy = evaluate_probe(model, test_x, test_y, criterion)
     best_val_accuracy = history[best_epoch - 1]["val_accuracy"]
+
+    with torch.no_grad():
+        predictions = model(test_x).argmax(dim=1).cpu().numpy()
 
     path = curves_path(encoder, dataset, k, seed, results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +273,8 @@ def run_linear_probe(
         "best_epoch": best_epoch,
         "num_train": len(indices),
         "history": history,
+        "predictions": predictions,
+        "labels": test_labels,
     }
 
 
