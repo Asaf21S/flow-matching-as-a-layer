@@ -225,6 +225,8 @@ checkpoints/
 *.npz
 !docs/**
 
+requirements-dev.txt
+
 .idea/
 docs/
 .github/

@@ -1,6 +1,0 @@
-# Local authoring only: no torch, no datasets, no training.
-# All compute runs on Google Colab.
-#   .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-
-pypdf>=5.0                 # tools/extract_pdf.py (spec PDF -> text)
-
