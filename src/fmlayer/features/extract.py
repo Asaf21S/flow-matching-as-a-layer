@@ -1,3 +1,4 @@
+import gc
 from pathlib import Path
 
 import numpy as np
@@ -89,9 +90,16 @@ def extract_split(
 
     feature_batches = []
     label_batches = []
-    for images, targets in tqdm(loader, desc=f"{encoder.name}/{dataset}/{split}", leave=False):
+    progress = tqdm(loader, desc=f"{encoder.name}/{dataset}/{split}", leave=False)
+    for images, targets in progress:
         feature_batches.append(encoder.embed_images(images).cpu().numpy())
         label_batches.append(targets.numpy())
+
+    # Release the workers before the next DataLoader forks, otherwise the new child
+    # processes inherit this iterator and its __del__ raises on exit.
+    progress.close()
+    del progress, loader
+    gc.collect()
 
     features = np.concatenate(feature_batches)
     labels = np.concatenate(label_batches)
