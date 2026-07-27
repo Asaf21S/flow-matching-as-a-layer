@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- project: Stage 1 artifacts ---
+data/                 # dataset downloads
+features/             # cached frozen-encoder features (.npz)
+results/              # runs.csv, figures, checkpoints
+checkpoints/
+*.npz
+!docs/**
+
+.idea/
+docs/
+.github/
+extract_pdf.py
