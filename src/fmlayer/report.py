@@ -11,6 +11,8 @@ from src.fmlayer.viz.embeddings import plot_embeddings_for_dataset
 
 TABLE_FILENAME = "accuracy_table.csv"
 GROUP_COLUMNS = ("method", "dataset", "encoder", "k")
+# Training-set size is a protocol order, not an alphabetical one.
+K_SORT_ORDER = {"5": 0, "10": 1, "full": 2, "none": 3}
 
 
 def accuracy_table(results_root: Path | None = None) -> pd.DataFrame:
@@ -21,7 +23,7 @@ def accuracy_table(results_root: Path | None = None) -> pd.DataFrame:
 
     Returns:
         One row per method/dataset/encoder/K with mean accuracy, standard deviation
-        and the number of runs behind it.
+        and the number of runs behind it, ordered K = 5, 10, full.
     """
     runs = load_runs(results_root)
     if not runs:
@@ -38,7 +40,11 @@ def accuracy_table(results_root: Path | None = None) -> pd.DataFrame:
     )
     # A single run has no spread; report 0 rather than NaN.
     table["std"] = table["std"].fillna(0.0)
-    return table.sort_values(list(GROUP_COLUMNS)).reset_index(drop=True)
+
+    table["k_order"] = table["k"].astype(str).map(K_SORT_ORDER).fillna(len(K_SORT_ORDER))
+    table = table.sort_values(["method", "dataset", "encoder", "k_order"])
+    return table.drop(columns="k_order").reset_index(drop=True)
+
 
 
 def save_accuracy_table(

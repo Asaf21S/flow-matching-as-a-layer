@@ -96,12 +96,18 @@ def plot_embedding(
     feature_root: Path | None = None,
     figures_root: Path | None = None,
     show: bool = True,
+    show_class_means: bool = False,
 ) -> Path:
     """Visualise test features together with their class prototypes.
 
     The projection is fitted jointly on the features and the prototypes that appear in
     the plot, and class colours follow the position in ``class_ids`` so they match
     across encoders.
+
+    A prototype is a unit vector, whereas the mean of the unit-norm features of a class
+    lies strictly inside the sphere. The prototype is that mean rescaled back onto the
+    sphere, so it projects further from the origin than the visual centre of its point
+    cloud. Enable ``show_class_means`` to draw those centres and see the effect.
 
     Args:
         encoder: Encoder key.
@@ -111,6 +117,7 @@ def plot_embedding(
         feature_root: Feature cache directory; defaults to the resolved feature root.
         figures_root: Figure directory; defaults to the figures root.
         show: Display the figure instead of closing it.
+        show_class_means: Also mark the projected mean of each class's points.
 
     Returns:
         Path of the written figure.
@@ -152,10 +159,23 @@ def plot_embedding(
             linewidth=0.8,
             zorder=3,
         )
+        if show_class_means and len(points):
+            ax.scatter(
+                points[:, 0].mean(),
+                points[:, 1].mean(),
+                s=90,
+                marker="X",
+                color=color,
+                edgecolor="black",
+                linewidth=0.8,
+                zorder=3,
+            )
 
+    markers = f"stars = {prototype_label}"
+    if show_class_means:
+        markers += ", crosses = projected class mean"
     ax.set_title(
-        f"{get_spec(dataset).display_name} - {encoder} test features "
-        f"({method.upper()}, stars = {prototype_label})"
+        f"{get_spec(dataset).display_name} - {encoder} test features ({method.upper()}, {markers})"
     )
     ax.set_xticks([])
     ax.set_yticks([])
@@ -173,6 +193,7 @@ def plot_embeddings_for_dataset(
     feature_root: Path | None = None,
     figures_root: Path | None = None,
     show: bool = True,
+    show_class_means: bool = False,
 ) -> list[Path]:
     """Visualise several encoders on the same classes, examples and colours.
 
@@ -184,6 +205,7 @@ def plot_embeddings_for_dataset(
         feature_root: Feature cache directory; defaults to the resolved feature root.
         figures_root: Figure directory; defaults to the figures root.
         show: Display the figures instead of closing them.
+        show_class_means: Also mark the projected mean of each class's points.
 
     Returns:
         Paths of the written figures.
@@ -194,6 +216,15 @@ def plot_embeddings_for_dataset(
         ]
     class_ids = select_classes(dataset, num_classes)
     return [
-        plot_embedding(encoder, dataset, class_ids, method, feature_root, figures_root, show)
+        plot_embedding(
+            encoder,
+            dataset,
+            class_ids,
+            method,
+            feature_root,
+            figures_root,
+            show,
+            show_class_means,
+        )
         for encoder in encoders
     ]

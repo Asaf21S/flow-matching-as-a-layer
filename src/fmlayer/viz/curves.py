@@ -63,19 +63,29 @@ def plot_curves(
     val_loss = [entry["val_loss"] for entry in run["history"]]
     val_accuracy = [entry["val_accuracy"] for entry in run["history"]]
 
+    best_epoch = run["best_epoch"]
+    min_loss_epoch = epochs[int(min(range(len(val_loss)), key=val_loss.__getitem__))]
+
     fig, (loss_ax, acc_ax) = plt.subplots(1, 2, figsize=(11, 4))
 
     loss_ax.plot(epochs, train_loss, label="train loss")
     loss_ax.plot(epochs, val_loss, label="val loss")
     loss_ax.axvline(
-        run["best_epoch"], color="grey", linestyle="--", label=f"best epoch {run['best_epoch']}"
+        best_epoch, color="grey", linestyle="--", label=f"selected epoch {best_epoch} (max val acc)"
+    )
+    loss_ax.axvline(
+        min_loss_epoch,
+        color="tab:red",
+        linestyle=":",
+        label=f"min val loss epoch {min_loss_epoch}",
     )
     loss_ax.set_xlabel("epoch")
     loss_ax.set_ylabel("cross-entropy loss")
-    loss_ax.legend()
+    loss_ax.legend(fontsize=8)
 
     acc_ax.plot(epochs, val_accuracy, color="tab:green")
-    acc_ax.axvline(run["best_epoch"], color="grey", linestyle="--")
+    acc_ax.axvline(best_epoch, color="grey", linestyle="--")
+    acc_ax.axvline(min_loss_epoch, color="tab:red", linestyle=":")
     acc_ax.set_xlabel("epoch")
     acc_ax.set_ylabel("validation accuracy")
 
