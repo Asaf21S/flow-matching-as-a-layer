@@ -6,41 +6,84 @@ from matplotlib.figure import Figure
 from src.fmlayer.utils.results import default_results_root
 
 FIGURES_DIRNAME = "figures"
-FIGURE_DPI = 150
+FIGURE_DPI = 180
+
+# Global Encoder Styling Standard
+ENCODER_COLORS = {
+    "resnet18": "#1f77b4",       # Standard Deep Blue
+    "dinov2_vits14": "#2ca02c",  # Standard Green
+    "clip_rn50": "#d62728",      # Standard Crimson Red
+}
+
+ENCODER_MARKERS = {
+    "resnet18": "o",
+    "dinov2_vits14": "s",
+    "clip_rn50": "^",
+}
+
+ENCODER_LABELS = {
+    "resnet18": "ResNet-18",
+    "dinov2_vits14": "DINOv2 ViT-S/14",
+    "clip_rn50": "CLIP RN50",
+}
+
+
+def apply_plot_style() -> None:
+    """Apply a clean, modern matplotlib theme for notebook inline figures."""
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.size": 10,
+        "axes.titlesize": 12,
+        "axes.titleweight": "bold",
+        "axes.labelsize": 10.5,
+        "axes.labelweight": "medium",
+        "axes.edgecolor": "#cccccc",
+        "axes.linewidth": 1.0,
+        "axes.grid": True,
+        "grid.alpha": 0.35,
+        "grid.linestyle": "--",
+        "grid.color": "#b0bec5",
+        "legend.frameon": True,
+        "legend.framealpha": 0.95,
+        "legend.facecolor": "#ffffff",
+        "legend.edgecolor": "#d0d0d0",
+        "legend.fontsize": 9,
+        "figure.facecolor": "#ffffff",
+        "figure.dpi": FIGURE_DPI,
+        "savefig.dpi": FIGURE_DPI,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.1,
+    })
 
 
 def default_figures_root(results_root: Path | None = None) -> Path:
-    """Resolve the directory figures are written to.
-
-    Args:
-        results_root: Results directory; defaults to the resolved results root.
-
-    Returns:
-        The ``figures`` directory inside the results root.
-    """
+    """Resolve the directory figures are written to."""
     root = Path(results_root) if results_root is not None else default_results_root()
     return root / FIGURES_DIRNAME
 
 
 def save_figure(
-    fig: Figure, name: str, figures_root: Path | None = None, show: bool = True
-) -> Path:
-    """Write a figure to disk and optionally display it.
+    fig: Figure, name: str = "", figures_root: Path | None = None, show: bool = True, save: bool = False
+) -> Path | None:
+    """Display the figure inline in the notebook cell output.
 
     Args:
-        fig: The figure to save.
+        fig: The matplotlib figure.
         name: File name without extension.
-        figures_root: Output directory; defaults to :func:`default_figures_root`.
-        show: Display the figure instead of closing it, which suits notebooks.
+        figures_root: Output directory.
+        show: Display figure inline in notebook cell.
+        save: Save PNG file to disk (default False).
 
     Returns:
-        Path of the written PNG.
+        Path of saved file if save=True, else None.
     """
-    root = Path(figures_root) if figures_root is not None else default_figures_root()
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{name}.png"
+    path = None
+    if save and name:
+        root = Path(figures_root) if figures_root is not None else default_figures_root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{name}.png"
+        fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
 
-    fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
     if show:
         plt.show()
     else:

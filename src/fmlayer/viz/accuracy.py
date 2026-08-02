@@ -8,22 +8,78 @@ from src.fmlayer.data.fewshot import K_FULL
 from src.fmlayer.data.specs import get_spec
 from src.fmlayer.models.zeroshot import METHOD as ZEROSHOT_METHOD
 from src.fmlayer.train.train_linear import METHOD as PROBE_METHOD
-from src.fmlayer.viz.figures import save_figure
+from src.fmlayer.viz.figures import (
+    ENCODER_COLORS,
+    ENCODER_LABELS,
+    ENCODER_MARKERS,
+    apply_plot_style,
+    save_figure,
+)
 
 K_ORDER = ("5", "10", K_FULL)
-ZEROSHOT_COLOR = "grey"
 
 
 def k_position(k: str) -> float:
-    """Map a training-set size onto the x axis.
-
-    Args:
-        k: ``"5"``, ``"10"`` or ``"full"``.
-
-    Returns:
-        The x coordinate of that setting.
-    """
+    """Map a training-set size onto the x axis."""
     return float(K_ORDER.index(k))
+
+
+def plot_combined_accuracy_vs_k(
+    table: pd.DataFrame,
+    datasets: list[str] | None = None,
+    show: bool = True,
+) -> None:
+    """Plot accuracy vs K for all datasets together side-by-side in a single combined figure."""
+    apply_plot_style()
+    datasets = datasets if datasets is not None else ["dtd", "aircraft"]
+    fig, axes = plt.subplots(1, len(datasets), figsize=(13, 5))
+    if len(datasets) == 1:
+        axes = [axes]
+
+    for ax, dataset in zip(axes, datasets):
+        subset = table[table["dataset"] == dataset]
+        probes = subset[subset["method"] == PROBE_METHOD]
+        for encoder, rows in probes.groupby("encoder"):
+            rows = rows.copy()
+            rows["position"] = rows["k"].map(k_position)
+            rows = rows.sort_values("position")
+            color = ENCODER_COLORS.get(encoder, "#333333")
+            marker = ENCODER_MARKERS.get(encoder, "o")
+            label = ENCODER_LABELS.get(encoder, encoder)
+            ax.errorbar(
+                rows["position"],
+                rows["mean"],
+                yerr=rows["std"],
+                marker=marker,
+                color=color,
+                linewidth=2,
+                markersize=7,
+                capsize=5,
+                capthick=1.5,
+                label=f"Linear probe ({label})",
+            )
+
+        zeroshot = subset[subset["method"] == ZEROSHOT_METHOD]
+        for _, row in zeroshot.iterrows():
+            clip_color = ENCODER_COLORS.get(row["encoder"], "#d62728")
+            clip_label = ENCODER_LABELS.get(row["encoder"], row["encoder"])
+            ax.axhline(
+                row["mean"],
+                color=clip_color,
+                linestyle="--",
+                linewidth=1.8,
+                label=f"Zero-shot {clip_label} ({row['mean'] * 100:.1f}%)",
+            )
+
+        ax.set_xticks(range(len(K_ORDER)), [f"K = {k}" for k in K_ORDER])
+        ax.set_xlabel("Training Images per Class (K)", labelpad=8)
+        ax.set_ylabel("Top-1 Test Accuracy", labelpad=8)
+        ax.set_title(f"{get_spec(dataset).display_name}", pad=10)
+        ax.legend(loc="best", frameon=True, framealpha=0.95)
+
+    fig.suptitle("Top-1 Accuracy vs. Training-Set Size (K)", fontsize=13, y=1.02)
+    fig.tight_layout()
+    save_figure(fig, "accuracy_vs_k_combined", show=show, save=False)
 
 
 def plot_accuracy_vs_k(
@@ -31,56 +87,54 @@ def plot_accuracy_vs_k(
     table: pd.DataFrame,
     figures_root: Path | None = None,
     show: bool = True,
-) -> Path:
-    """Plot top-1 accuracy against training-set size, with error bars.
-
-    Each encoder gets a line over K, and the zero-shot CLIP result is drawn as a
-    horizontal reference line since it uses no labelled training images.
-
-    Args:
-        dataset: Dataset key.
-        table: Aggregated results as returned by the report module.
-        figures_root: Figure directory; defaults to the figures root.
-        show: Display the figure instead of closing it.
-
-    Returns:
-        Path of the written figure.
-    """
+    save: bool = False,
+) -> Path | None:
+    """Plot accuracy vs K for a single dataset."""
+    apply_plot_style()
     subset = table[table["dataset"] == dataset]
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(7, 4.8))
 
     probes = subset[subset["method"] == PROBE_METHOD]
     for encoder, rows in probes.groupby("encoder"):
         rows = rows.copy()
         rows["position"] = rows["k"].map(k_position)
         rows = rows.sort_values("position")
+        color = ENCODER_COLORS.get(encoder, "#333333")
+        marker = ENCODER_MARKERS.get(encoder, "o")
+        label = ENCODER_LABELS.get(encoder, encoder)
         ax.errorbar(
             rows["position"],
             rows["mean"],
             yerr=rows["std"],
-            marker="o",
-            capsize=4,
-            label=f"linear probe ({encoder})",
+            marker=marker,
+            color=color,
+            linewidth=2,
+            markersize=7,
+            capsize=5,
+            capthick=1.5,
+            label=f"Linear probe ({label})",
         )
 
     zeroshot = subset[subset["method"] == ZEROSHOT_METHOD]
     for _, row in zeroshot.iterrows():
+        clip_color = ENCODER_COLORS.get(row["encoder"], "#d62728")
+        clip_label = ENCODER_LABELS.get(row["encoder"], row["encoder"])
         ax.axhline(
             row["mean"],
-            color=ZEROSHOT_COLOR,
+            color=clip_color,
             linestyle="--",
-            label=f"zero-shot CLIP RN50 ({row['mean']:.3f})",
+            linewidth=1.8,
+            label=f"Zero-shot {clip_label} ({row['mean'] * 100:.1f}%)",
         )
 
-    ax.set_xticks(range(len(K_ORDER)), [str(k) for k in K_ORDER])
-    ax.set_xlabel("training images per class (K)")
-    ax.set_ylabel("top-1 accuracy on the test split")
-    ax.set_title(f"{get_spec(dataset).display_name}: accuracy vs training-set size")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=9)
+    ax.set_xticks(range(len(K_ORDER)), [f"K = {k}" for k in K_ORDER])
+    ax.set_xlabel("Training Images per Class (K)", labelpad=8)
+    ax.set_ylabel("Top-1 Test Accuracy", labelpad=8)
+    ax.set_title(f"{get_spec(dataset).display_name}: Accuracy vs. Training-Set Size", pad=12)
+    ax.legend(loc="best", frameon=True, framealpha=0.95)
     fig.tight_layout()
 
-    return save_figure(fig, f"accuracy_vs_k_{dataset}", figures_root, show)
+    return save_figure(fig, f"accuracy_vs_k_{dataset}", figures_root, show=show, save=save)
 
 
 def plot_accuracy_vs_k_all(
@@ -88,17 +142,8 @@ def plot_accuracy_vs_k_all(
     datasets: list[str] | None = None,
     figures_root: Path | None = None,
     show: bool = True,
-) -> list[Path]:
-    """Draw the accuracy-versus-K figure for several datasets.
-
-    Args:
-        table: Aggregated results as returned by the report module.
-        datasets: Dataset keys; defaults to those present in the table.
-        figures_root: Figure directory; defaults to the figures root.
-        show: Display the figures instead of closing them.
-
-    Returns:
-        Paths of the written figures.
-    """
+    save: bool = False,
+) -> list[Path | None]:
+    """Draw the accuracy-versus-K figure for several datasets."""
     datasets = datasets if datasets is not None else sorted(np.unique(table["dataset"]))
-    return [plot_accuracy_vs_k(dataset, table, figures_root, show) for dataset in datasets]
+    return [plot_accuracy_vs_k(dataset, table, figures_root, show=show, save=save) for dataset in datasets]
