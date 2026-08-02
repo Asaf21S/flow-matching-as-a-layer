@@ -231,3 +231,5 @@ requirements-dev.txt
 docs/
 .github/
 extract_pdf.py
+
+myenv
