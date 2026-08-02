@@ -1,9 +1,12 @@
+import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
 from src.fmlayer.utils.results import default_results_root
+
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 FIGURES_DIRNAME = "figures"
 FIGURE_DPI = 180
@@ -36,7 +39,7 @@ def apply_plot_style() -> None:
         "axes.titlesize": 12,
         "axes.titleweight": "bold",
         "axes.labelsize": 10.5,
-        "axes.labelweight": "medium",
+        "axes.labelweight": "normal",
         "axes.edgecolor": "#cccccc",
         "axes.linewidth": 1.0,
         "axes.grid": True,
@@ -79,7 +82,7 @@ def save_figure(
     """
     path = None
     if save and name:
-        root = Path(figures_root) if figures_root is not None else default_figures_root()
+        root = Path(figures_root) if figures_root is not None else default_results_root()
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"{name}.png"
         fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
