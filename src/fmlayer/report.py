@@ -10,7 +10,9 @@ from src.fmlayer.viz.curves import plot_representative_curves
 from src.fmlayer.viz.embeddings import plot_embeddings_for_dataset
 
 TABLE_FILENAME = "accuracy_table.csv"
-GROUP_COLUMNS = ("method", "dataset", "encoder", "k")
+# ``t`` is constant for every stage 1 method, so it only splits rows for later stages
+# that sweep the flow-matching integration time.
+GROUP_COLUMNS = ("method", "dataset", "encoder", "k", "t")
 # Training-set size is a protocol order, not an alphabetical one.
 K_SORT_ORDER = {"5": 0, "10": 1, "full": 2, "none": 3}
 
