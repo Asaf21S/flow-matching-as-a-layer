@@ -25,7 +25,7 @@ is one run per dataset.
 
 | Method | Encoder | K | Top-1 accuracy |
 | --- | --- | --- | --- |
-| Linear probe | ResNet-18 | 5 | 0.4516 +/- 0.0103 |
+| Linear probe | ResNet-18 | 5 | 0.4514 +/- 0.0105 |
 | Linear probe | ResNet-18 | 10 | 0.5445 +/- 0.0094 |
 | Linear probe | ResNet-18 | full | 0.6284 +/- 0.0045 |
 | Linear probe | DINOv2 ViT-S/14 | 5 | 0.6234 +/- 0.0014 |
@@ -37,10 +37,10 @@ is one run per dataset.
 
 | Method | Encoder | K | Top-1 accuracy |
 | --- | --- | --- | --- |
-| Linear probe | ResNet-18 | 5 | 0.1974 +/- 0.0153 |
-| Linear probe | ResNet-18 | 10 | 0.2725 +/- 0.0062 |
-| Linear probe | ResNet-18 | full | **0.3654 +/- 0.0012** |
-| Zero-shot CLIP | CLIP RN50 | n/a | 0.1554 |
+| Linear probe | ResNet-18 | 5 | 0.1972 +/- 0.0162 |
+| Linear probe | ResNet-18 | 10 | 0.2720 +/- 0.0056 |
+| Linear probe | ResNet-18 | full | **0.3662 +/- 0.0027** |
+| Zero-shot CLIP | CLIP RN50 | n/a | 0.1545 |
 
 <details>
 <summary>Per-run detail (27 runs), with the epoch selected by checkpointing</summary>
@@ -48,22 +48,22 @@ is one run per dataset.
 | Encoder | Dataset | K | Seed | Train images | Val acc @ epoch | Test acc |
 | --- | --- | --- | --- | --- | --- | --- |
 | ResNet-18 | DTD | 5 | 0 | 235 | 0.4489 @ 125 | 0.4628 |
-| ResNet-18 | DTD | 5 | 1 | 235 | 0.4559 @ 32 | 0.4426 |
+| ResNet-18 | DTD | 5 | 1 | 235 | 0.4553 @ 31 | 0.4420 |
 | ResNet-18 | DTD | 5 | 2 | 235 | 0.4309 @ 150 | 0.4495 |
 | ResNet-18 | DTD | 10 | 0 | 470 | 0.5074 @ 32 | 0.5399 |
-| ResNet-18 | DTD | 10 | 1 | 470 | 0.5378 @ 65 | 0.5383 |
+| ResNet-18 | DTD | 10 | 1 | 470 | 0.5383 @ 65 | 0.5383 |
 | ResNet-18 | DTD | 10 | 2 | 470 | 0.5144 @ 27 | 0.5553 |
-| ResNet-18 | DTD | full | 0 | 1880 | 0.6080 @ 23 | 0.6335 |
+| ResNet-18 | DTD | full | 0 | 1880 | 0.6085 @ 23 | 0.6335 |
 | ResNet-18 | DTD | full | 1 | 1880 | 0.6064 @ 16 | 0.6255 |
-| ResNet-18 | DTD | full | 2 | 1880 | 0.6069 @ 18 | 0.6261 |
-| ResNet-18 | Aircraft | 5 | 0 | 500 | 0.1872 @ 111 | 0.1806 |
-| ResNet-18 | Aircraft | 5 | 1 | 500 | 0.2058 @ 182 | 0.2010 |
-| ResNet-18 | Aircraft | 5 | 2 | 500 | 0.2064 @ 199 | 0.2106 |
-| ResNet-18 | Aircraft | 10 | 0 | 1000 | 0.2658 @ 196 | 0.2781 |
-| ResNet-18 | Aircraft | 10 | 1 | 1000 | 0.2571 @ 166 | 0.2658 |
-| ResNet-18 | Aircraft | 10 | 2 | 1000 | 0.2523 @ 65 | 0.2736 |
-| ResNet-18 | Aircraft | full | 0 | 3334 | 0.3834 @ 200 | 0.3654 |
-| ResNet-18 | Aircraft | full | 1 | 3334 | 0.3840 @ 138 | 0.3642 |
+| ResNet-18 | DTD | full | 2 | 1880 | 0.6064 @ 18 | 0.6261 |
+| ResNet-18 | Aircraft | 5 | 0 | 500 | 0.1869 @ 75 | 0.1794 |
+| ResNet-18 | Aircraft | 5 | 1 | 500 | 0.2055 @ 182 | 0.2010 |
+| ResNet-18 | Aircraft | 5 | 2 | 500 | 0.2061 @ 183 | 0.2112 |
+| ResNet-18 | Aircraft | 10 | 0 | 1000 | 0.2658 @ 196 | 0.2778 |
+| ResNet-18 | Aircraft | 10 | 1 | 1000 | 0.2571 @ 158 | 0.2667 |
+| ResNet-18 | Aircraft | 10 | 2 | 1000 | 0.2520 @ 46 | 0.2715 |
+| ResNet-18 | Aircraft | full | 0 | 3334 | 0.3831 @ 164 | 0.3633 |
+| ResNet-18 | Aircraft | full | 1 | 3334 | 0.3843 @ 175 | 0.3687 |
 | ResNet-18 | Aircraft | full | 2 | 3334 | 0.3834 @ 157 | 0.3666 |
 | DINOv2 | DTD | 5 | 0 | 235 | 0.6197 @ 192 | 0.6250 |
 | DINOv2 | DTD | 5 | 1 | 235 | 0.6319 @ 157 | 0.6229 |
@@ -101,8 +101,10 @@ selected checkpoint.
 ![Training curves](figures/curves_combined_k10_seed0.png)
 
 - Training is stable: the train loss falls smoothly, with no oscillation at lr 1e-3.
-- Overfitting is clear and depends on K. With the full split the selected epoch collapses to
-  **12-30**, while few-shot runs select epochs **125-199** and are still underfitted at 200.
+- Overfitting scales with the amount of data. On DTD the full-split runs peak very early
+  (epochs 12-30) and only overfit afterwards, while the DINOv2 few-shot runs peak late
+  (140-193). On Aircraft even the full-split runs peak late (157-175), so 200 epochs is not
+  excessive there.
 
 ---
 
