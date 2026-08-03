@@ -76,6 +76,18 @@ def draw_accuracy_vs_t(ax: plt.Axes, curve: dict, dataset: str) -> None:
         label=f"Constant-shift ablation ({curve['constant_shift_accuracy'] * 100:.1f}%)",
     )
 
+    if "best_time" in curve:
+        ax.axvline(
+            curve["best_time"],
+            color="#1a7f37",
+            linestyle="-.",
+            linewidth=1.6,
+            label=(
+                f"t selected on val = {curve['best_time']:.1f} "
+                f"({curve['accuracy_at_best_time'] * 100:.1f}%)"
+            ),
+        )
+
     ax.set_xlabel("Integration time t", labelpad=8)
     ax.set_ylabel("Top-1 Test Accuracy", labelpad=8)
     ax.set_xlim(0.0, 1.0)

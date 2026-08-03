@@ -80,14 +80,22 @@ def print_flow_table(table: pd.DataFrame, results_root: Path | None = None) -> N
         end = rows[rows["t"] == 1.0]["mean"].item()
         spread = rows[rows["t"] == 1.0]["std"].item()
 
+        peak = rows.loc[rows["mean"].idxmax()]
+
         if dataset in zeroshot:
             print(f"  stage 1 zero-shot     {zeroshot[dataset]:.4f}")
         print(f"  flow layer at t=0     {start:.4f}")
         print(f"  flow layer at t=1     {end:.4f} +/- {spread:.4f}")
-        print(f"  absolute gain         {end - start:+.4f}\n")
+        print(f"  best t = {peak['t']:.2f}         {peak['mean']:.4f} +/- {peak['std']:.4f}")
+        print(f"  gain at best t        {peak['mean'] - start:+.4f}")
+        print(f"  gain at t=1           {end - start:+.4f}\n")
 
         for _, row in rows.iterrows():
-            print(f"    t={row['t']:.2f}  {row['mean']:.4f} +/- {row['std']:.4f}  (n={row['runs']})")
+            marker = "  <-- best" if row["t"] == peak["t"] else ""
+            print(
+                f"    t={row['t']:.2f}  {row['mean']:.4f} +/- {row['std']:.4f}  "
+                f"(n={row['runs']}){marker}"
+            )
 
 
 def make_stage2_report(

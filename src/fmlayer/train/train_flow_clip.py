@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from tqdm.auto import tqdm
 
 from src.fmlayer.data.specs import DATASET_SPECS, get_spec
@@ -12,10 +12,13 @@ from src.fmlayer.encoders.clip_rn50 import ClipRN50Encoder
 from src.fmlayer.features.cache import load_split
 from src.fmlayer.models.flow_matching_clip import (
     ClipFlowWrapper,
+    TEMPERATURE,
     build_path,
     build_velocity_field,
+    cosine_logits,
     field_config,
-    flow_matching_loss,
+    predicted_endpoint,
+    sample_paths,
 )
 from src.fmlayer.models.flow_ode import (
     DEFAULT_METHOD,
@@ -37,9 +40,19 @@ WEIGHT_DECAY = 1e-4
 BATCH_SIZE = 256
 MAX_EPOCHS = 300
 EVAL_EVERY = 10
+# Weight of the endpoint cross-entropy added to the flow-matching regression. Pure CFM
+# regresses onto a barycentre of prototypes, which is the worst possible place for a cosine
+# 1-NN; this term makes the layer optimise the metric it is scored on.
+CE_WEIGHT = 1.0
+# Gaussian smoothing of the t=1 target, so it is a cloud rather than one of C atoms.
+TARGET_NOISE = 0.1
+# Keep the integration on the unit sphere, where the cosine classifier lives.
+RENORMALIZE = True
 # 51 points puts a grid time on every 0.02; every 5th one is recorded in runs.csv.
 CURVE_POINTS = 51
 RECORD_STRIDE = 5
+# Validation sweeps the same 11 times that get recorded, so the selected t is on the grid.
+VAL_POINTS = 11
 SOLVER_STEPS = (10, 50, 200)
 # The t=0 endpoint is the untouched embedding, so it must land on the zero-shot number.
 # The slack only absorbs float32/TF32 tie-breaking between the torch and numpy matmuls.
@@ -95,9 +108,11 @@ def constant_shift_accuracy(
 ) -> float:
     """Score the trivial ablation of translating every embedding by one shared vector.
 
-    The mean training displacement is essentially the CLIP modality gap. Because the same
-    vector is added to every embedding it barely reorders the cosine similarities, so
-    beating this number is what shows the flow learned class structure rather than a shift.
+    The mean training displacement is essentially the CLIP modality gap. Note this is *not*
+    a no-op for the classifier: with unit-norm prototypes the shifted score is
+    ``(z + m) . t_c = z . t_c + m . t_c``, and the bias ``m . t_c`` differs per class, so a
+    shared translation reorders the similarities and typically hurts. It is a lower bound
+    the flow must clear, not a neutral reference.
 
     Args:
         train_features: Unit-norm training image embeddings.
@@ -116,6 +131,7 @@ def constant_shift_accuracy(
 def train_flow(
     source: Tensor,
     target: Tensor,
+    source_labels: Tensor,
     val_features: Tensor,
     val_labels: np.ndarray,
     prototypes: Tensor,
@@ -127,15 +143,23 @@ def train_flow(
     weight_decay: float = WEIGHT_DECAY,
     eval_every: int = EVAL_EVERY,
     val_steps: int = DEFAULT_STEPS,
-) -> tuple[ClipFlowWrapper, list[dict], int]:
-    """Fit the velocity field and keep the checkpoint with the best validation accuracy.
+    val_points: int = VAL_POINTS,
+    ce_weight: float = CE_WEIGHT,
+    temperature: float = TEMPERATURE,
+    target_noise: float = TARGET_NOISE,
+    renormalize: bool = RENORMALIZE,
+    verbose: bool = True,
+) -> tuple[ClipFlowWrapper, list[dict], int, float]:
+    """Fit the velocity field, selecting both the epoch and the stopping time on validation.
 
-    Validation integrates the whole val split to t=1 and classifies the endpoint, which is
-    the quantity the layer is actually judged on, rather than the regression loss.
+    The loss is the flow-matching regression plus, optionally, a cross-entropy on the
+    single-step estimate of the t=1 endpoint. Validation sweeps the whole time grid rather
+    than only t=1, because the transport is most useful before it contracts the cloud.
 
     Args:
         source: Unit-norm training image embeddings, the t=0 end of each path.
         target: Text embedding of each training image's label, the t=1 end.
+        source_labels: Labels of the training images, for the endpoint cross-entropy.
         val_features: Unit-norm validation image embeddings.
         val_labels: Labels of the validation split.
         prototypes: Unit-norm text prototypes used for the validation 1-NN.
@@ -145,11 +169,18 @@ def train_flow(
         batch_size: Examples per optimisation step.
         learning_rate: AdamW learning rate.
         weight_decay: AdamW weight decay.
-        eval_every: Epochs between validation integrations.
+        eval_every: Epochs between validation sweeps.
         val_steps: Euler sub-steps used when integrating the validation split.
+        val_points: Number of times the validation sweep evaluates.
+        ce_weight: Weight of the endpoint cross-entropy; 0 gives pure flow matching.
+        temperature: Softmax temperature of the endpoint cross-entropy.
+        target_noise: Gaussian smoothing of the t=1 target.
+        renormalize: Keep the validation integration on the unit sphere.
+        verbose: Print per-epoch losses and validation accuracy.
 
     Returns:
-        The field restored to its best checkpoint, the history and the best epoch.
+        The field at its best checkpoint, the history, the best epoch and the time that
+        maximised validation accuracy.
     """
     model = build_velocity_field(source.shape[1], seed, device)
     path = build_path()
@@ -157,49 +188,96 @@ def train_flow(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    endpoints = make_time_grid(2, device=device)
+    val_grid = make_time_grid(val_points, device=device)
+    criterion = nn.CrossEntropyLoss()
 
     history = []
     best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
     best_accuracy = -1.0
     best_epoch = 0
+    best_time = 1.0
     num_train = len(source)
 
     for epoch in range(1, max_epochs + 1):
         model.train()
         order = torch.randperm(num_train, generator=generator).to(device)
-        epoch_loss = 0.0
+        flow_total = 0.0
+        class_total = 0.0
 
         for start in range(0, num_train, batch_size):
             batch = order[start : start + batch_size]
             optimizer.zero_grad(set_to_none=True)
-            loss = flow_matching_loss(model, path, source[batch], target[batch], generator)
+
+            sample = sample_paths(
+                path, source[batch], target[batch], generator, target_noise
+            )
+            velocity = model(x=sample.x_t, t=sample.t)
+            flow_loss = nn.functional.mse_loss(velocity, sample.dx_t)
+            loss = flow_loss
+
+            class_loss = torch.zeros((), device=device)
+            if ce_weight > 0.0:
+                endpoint = predicted_endpoint(sample.x_t, sample.t, velocity)
+                class_loss = criterion(
+                    cosine_logits(endpoint, prototypes, temperature), source_labels[batch]
+                )
+                loss = loss + ce_weight * class_loss
+
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item() * len(batch)
+            flow_total += flow_loss.item() * len(batch)
+            class_total += float(class_loss) * len(batch)
 
-        entry = {"epoch": epoch, "train_loss": epoch_loss / num_train}
+        entry = {
+            "epoch": epoch,
+            "flow_loss": flow_total / num_train,
+            "class_loss": class_total / num_train,
+        }
 
         if epoch % eval_every == 0 or epoch == max_epochs:
             model.eval()
-            predictions = trajectory_predictions(
-                model, val_features, prototypes, endpoints, steps=val_steps
+            accuracies = trajectory_accuracies(
+                trajectory_predictions(
+                    model,
+                    val_features,
+                    prototypes,
+                    val_grid,
+                    steps=val_steps,
+                    renormalize=renormalize,
+                ),
+                val_labels,
             )
-            val_accuracy = top1_accuracy(predictions[-1], val_labels)
-            entry["val_accuracy"] = val_accuracy
+            index = int(np.argmax(accuracies))
+            entry["val_accuracy"] = accuracies[index]
+            entry["val_time"] = float(val_grid[index])
+            entry["val_accuracy_t1"] = accuracies[-1]
 
-            if val_accuracy > best_accuracy:
-                best_accuracy = val_accuracy
+            if verbose:
+                print(
+                    f"  epoch {epoch:3d}  flow {entry['flow_loss']:.4f}  "
+                    f"ce {entry['class_loss']:.4f}  "
+                    f"val {accuracies[index]:.4f}@t={entry['val_time']:.1f}  "
+                    f"(t=1 {accuracies[-1]:.4f})"
+                )
+
+            if accuracies[index] > best_accuracy:
+                best_accuracy = accuracies[index]
                 best_epoch = epoch
+                best_time = entry["val_time"]
                 best_state = {
                     key: value.detach().clone()
                     for key, value in model.state_dict().items()
                 }
+        elif verbose and epoch % 10 == 0:
+            print(
+                f"  epoch {epoch:3d}  flow {entry['flow_loss']:.4f}  "
+                f"ce {entry['class_loss']:.4f}"
+            )
 
         history.append(entry)
 
     model.load_state_dict(best_state)
-    return model, history, best_epoch
+    return model, history, best_epoch, best_time
 
 
 def curves_path(dataset: str, seed: int, results_root: Path | None = None) -> Path:
@@ -278,6 +356,9 @@ def run_flow_clip(
     max_epochs: int = MAX_EPOCHS,
     solver_steps: tuple[int, ...] = SOLVER_STEPS,
     method: str = DEFAULT_METHOD,
+    ce_weight: float = CE_WEIGHT,
+    target_noise: float = TARGET_NOISE,
+    renormalize: bool = RENORMALIZE,
     record: bool = True,
     verbose: bool = True,
 ) -> dict:
@@ -292,8 +373,11 @@ def run_flow_clip(
         max_epochs: Number of training epochs.
         solver_steps: Euler sub-step counts the accuracy curve is recomputed with.
         method: Solver method used for the curves.
+        ce_weight: Weight of the endpoint cross-entropy; 0 gives pure flow matching.
+        target_noise: Gaussian smoothing of the t=1 target.
+        renormalize: Keep the integration on the unit sphere.
         record: Append the per-t accuracies to ``runs.csv``.
-        verbose: Print a summary.
+        verbose: Print per-epoch loss and validation, plus a final summary.
 
     Returns:
         The t=0 and t=1 accuracies, the reference baselines, the dense curve per solver
@@ -309,13 +393,15 @@ def run_flow_clip(
 
     source = torch.from_numpy(train_features).to(device)
     target = torch.from_numpy(prototypes[train_labels]).to(device)
+    source_labels = torch.from_numpy(train_labels).long().to(device)
     val_x = torch.from_numpy(val_features).to(device)
     test_x = torch.from_numpy(test_features).to(device)
     prototypes_x = torch.from_numpy(prototypes).to(device)
 
-    model, history, best_epoch = train_flow(
+    model, history, best_epoch, best_time = train_flow(
         source,
         target,
+        source_labels,
         val_x,
         val_labels,
         prototypes_x,
@@ -323,6 +409,10 @@ def run_flow_clip(
         device,
         max_epochs,
         val_steps=DEFAULT_STEPS,
+        ce_weight=ce_weight,
+        target_noise=target_noise,
+        renormalize=renormalize,
+        verbose=verbose,
     )
     model.eval()
 
@@ -331,7 +421,13 @@ def run_flow_clip(
     curves = {
         steps: trajectory_accuracies(
             trajectory_predictions(
-                model, test_x, prototypes_x, time_grid, method, steps
+                model,
+                test_x,
+                prototypes_x,
+                time_grid,
+                method,
+                steps,
+                renormalize=renormalize,
             ),
             test_labels,
         )
@@ -352,6 +448,9 @@ def run_flow_clip(
     best_val_accuracy = max(
         entry["val_accuracy"] for entry in history if "val_accuracy" in entry
     )
+    # The stopping time is chosen on validation, so the test number stays honest.
+    selected = min(range(len(times)), key=lambda index: abs(times[index] - best_time))
+    accuracy_at_best_time = reference[selected]
 
     payload = {
         "method": METHOD,
@@ -361,6 +460,11 @@ def run_flow_clip(
         "num_train": len(train_labels),
         "best_epoch": best_epoch,
         "best_val_accuracy": best_val_accuracy,
+        "best_time": best_time,
+        "accuracy_at_best_time": accuracy_at_best_time,
+        "ce_weight": ce_weight,
+        "target_noise": target_noise,
+        "renormalize": renormalize,
         "solver_method": method,
         "times": times,
         "curves": {str(steps): values for steps, values in curves.items()},
@@ -404,9 +508,9 @@ def run_flow_clip(
     if verbose:
         print(
             f"    {dataset:<9} seed={seed}  train={len(train_labels):>5}  "
-            f"val={best_val_accuracy:.4f}@{best_epoch:<4} "
-            f"t=0 {reference[0]:.4f} -> t=1 {reference[-1]:.4f}  "
-            f"(shift ablation {shift_accuracy:.4f})"
+            f"epoch {best_epoch:<4} "
+            f"t=0 {reference[0]:.4f} | best t={best_time:.1f} {accuracy_at_best_time:.4f} "
+            f"| t=1 {reference[-1]:.4f}  (shift {shift_accuracy:.4f})"
         )
 
     return {
@@ -416,6 +520,8 @@ def run_flow_clip(
         "curves": curves,
         "accuracy_t0": reference[0],
         "accuracy_t1": reference[-1],
+        "best_time": best_time,
+        "accuracy_at_best_time": accuracy_at_best_time,
         "zeroshot_accuracy": zeroshot_accuracy,
         "constant_shift_accuracy": shift_accuracy,
         "best_epoch": best_epoch,
@@ -434,7 +540,11 @@ def run_all_flow_clip(
     device: torch.device | None = None,
     max_epochs: int = MAX_EPOCHS,
     solver_steps: tuple[int, ...] = SOLVER_STEPS,
+    ce_weight: float = CE_WEIGHT,
+    target_noise: float = TARGET_NOISE,
+    renormalize: bool = RENORMALIZE,
     record: bool = True,
+    verbose: bool = True,
 ) -> dict:
     """Train the flow-matching layer on every dataset and seed.
 
@@ -446,7 +556,11 @@ def run_all_flow_clip(
         device: Device to train on; defaults to CUDA when available.
         max_epochs: Number of training epochs.
         solver_steps: Euler sub-step counts the accuracy curve is recomputed with.
+        ce_weight: Weight of the endpoint cross-entropy; 0 gives pure flow matching.
+        target_noise: Gaussian smoothing of the t=1 target.
+        renormalize: Keep the integration on the unit sphere.
         record: Append the results to ``runs.csv``.
+        verbose: Print per-epoch progress.
 
     Returns:
         One result per run, keyed by ``"dataset/seed"``.
@@ -466,7 +580,11 @@ def run_all_flow_clip(
             device,
             max_epochs,
             solver_steps,
+            ce_weight=ce_weight,
+            target_noise=target_noise,
+            renormalize=renormalize,
             record=record,
+            verbose=verbose,
         )
 
     print(f"\n{len(results)} flow-matching runs complete.")
@@ -480,7 +598,7 @@ def summarize_flow_clip(results: dict) -> dict:
         results: Output of :func:`run_all_flow_clip`.
 
     Returns:
-        The t=0 and t=1 accuracies and the two reference baselines, keyed by dataset.
+        The t=0, best-t and t=1 accuracies plus the reference baselines, keyed by dataset.
     """
     grouped: dict[str, list[dict]] = {}
     for result in results.values():
@@ -490,18 +608,25 @@ def summarize_flow_clip(results: dict) -> dict:
     for dataset, runs in sorted(grouped.items()):
         start = np.asarray([run["accuracy_t0"] for run in runs])
         end = np.asarray([run["accuracy_t1"] for run in runs])
+        best = np.asarray([run["accuracy_at_best_time"] for run in runs])
+        times = [run["best_time"] for run in runs]
         summary[dataset] = {
             "t0_mean": float(start.mean()),
             "t1_mean": float(end.mean()),
             "t1_std": float(end.std(ddof=0)),
+            "best_mean": float(best.mean()),
+            "best_std": float(best.std(ddof=0)),
+            "best_times": times,
             "zeroshot": runs[0]["zeroshot_accuracy"],
             "constant_shift": runs[0]["constant_shift_accuracy"],
             "runs": len(runs),
         }
+        gain = best.mean() - start.mean()
         print(
             f"{get_spec(dataset).display_name:<15} "
-            f"t=0 {start.mean():.4f}  ->  t=1 {end.mean():.4f} +/- {end.std(ddof=0):.4f}  "
-            f"(n={len(runs)}, shift ablation {runs[0]['constant_shift_accuracy']:.4f})"
+            f"t=0 {start.mean():.4f} | best {best.mean():.4f} +/- {best.std(ddof=0):.4f} "
+            f"at t={times} | t=1 {end.mean():.4f}  "
+            f"=> {gain:+.4f} over the baseline (n={len(runs)})"
         )
     return summary
 

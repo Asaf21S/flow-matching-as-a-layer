@@ -36,7 +36,11 @@ def make_time_grid(
 
 @torch.no_grad()
 def euler_trajectory(
-    model: nn.Module, x_init: Tensor, time_grid: Tensor, steps: int = DEFAULT_STEPS
+    model: nn.Module,
+    x_init: Tensor,
+    time_grid: Tensor,
+    steps: int = DEFAULT_STEPS,
+    renormalize: bool = False,
 ) -> Tensor:
     """Integrate with an explicit Euler loop, recording the state at every grid time.
 
@@ -48,6 +52,8 @@ def euler_trajectory(
         x_init: Initial states of shape ``(num_items, dim)``.
         time_grid: Times to report at; may increase or decrease.
         steps: Sub-steps per unit of time, so the step size is ``1 / steps``.
+        renormalize: Project back to the unit sphere after every sub-step, keeping the
+            flow on the manifold the cosine classifier actually measures on.
 
     Returns:
         Trajectory of shape ``(len(time_grid), num_items, dim)``.
@@ -63,6 +69,8 @@ def euler_trajectory(
         t = start
         for _ in range(substeps):
             x = x + size * model(x=x, t=t)
+            if renormalize:
+                x = nn.functional.normalize(x, dim=-1, eps=EPSILON)
             t = t + size
         states.append(x)
     return torch.stack(states)
@@ -75,6 +83,7 @@ def integrate(
     time_grid: Tensor,
     method: str = DEFAULT_METHOD,
     steps: int = DEFAULT_STEPS,
+    renormalize: bool = False,
 ) -> Tensor:
     """Integrate the velocity field and return every intermediate state.
 
@@ -84,12 +93,14 @@ def integrate(
         time_grid: Times to report at; a decreasing grid runs the flow in reverse.
         method: ``"euler"``, ``"midpoint"``, ``"dopri5"``, or ``"manual_euler"``.
         steps: Sub-steps per unit of time for the fixed-step methods.
+        renormalize: Keep the trajectory on the unit sphere; forces the manual solver,
+            since the projection has to happen inside the integration loop.
 
     Returns:
         Trajectory of shape ``(len(time_grid), num_items, dim)``.
     """
-    if method == MANUAL_EULER:
-        return euler_trajectory(model, x_init, time_grid, steps)
+    if method == MANUAL_EULER or renormalize:
+        return euler_trajectory(model, x_init, time_grid, steps, renormalize)
 
     solver = ODESolver(velocity_model=model)
     return solver.sample(
@@ -110,6 +121,7 @@ def trajectory_predictions(
     method: str = DEFAULT_METHOD,
     steps: int = DEFAULT_STEPS,
     chunk_size: int = CHUNK_SIZE,
+    renormalize: bool = False,
 ) -> np.ndarray:
     """Classify against fixed prototypes at every point along the trajectory.
 
@@ -124,6 +136,7 @@ def trajectory_predictions(
         method: Solver method.
         steps: Sub-steps per unit of time for the fixed-step methods.
         chunk_size: Items integrated at once.
+        renormalize: Keep the trajectory on the unit sphere during integration.
 
     Returns:
         Nearest-prototype labels of shape ``(len(time_grid), num_items)``.
@@ -133,7 +146,12 @@ def trajectory_predictions(
 
     for start in range(0, len(features), chunk_size):
         trajectory = integrate(
-            model, features[start : start + chunk_size], time_grid, method, steps
+            model,
+            features[start : start + chunk_size],
+            time_grid,
+            method,
+            steps,
+            renormalize,
         )
         similarities = (
             nn.functional.normalize(trajectory, dim=-1, eps=EPSILON)

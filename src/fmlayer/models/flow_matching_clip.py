@@ -6,12 +6,17 @@ from flow_matching.path.scheduler import CondOTScheduler
 from flow_matching.utils import ModelWrapper
 from torch import Tensor, nn
 
+from src.fmlayer.models.prototypes import EPSILON
 from src.fmlayer.utils.seeding import set_seed
 
 TIME_EMBED_DIM = 128
-HIDDEN_DIM = 2048
-NUM_BLOCKS = 3
-DROPOUT = 0.0
+# 1024-d inputs with only 1880-3334 training pairs overfit badly at 2048x3, which is what
+# drove the first run's collapse; keep the trunk small and regularised.
+HIDDEN_DIM = 1024
+NUM_BLOCKS = 2
+DROPOUT = 0.1
+# CLIP's own logit scale is ~100, i.e. a temperature of 0.01 on cosine similarities.
+TEMPERATURE = 0.01
 
 
 def sinusoidal_time_embedding(t: Tensor, dim: int) -> Tensor:
@@ -197,25 +202,68 @@ def build_path() -> AffineProbPath:
     return AffineProbPath(scheduler=CondOTScheduler())
 
 
-def flow_matching_loss(
-    model: ClipFlowWrapper,
+def sample_paths(
     path: AffineProbPath,
     x_0: Tensor,
     x_1: Tensor,
     generator: torch.Generator,
-) -> Tensor:
-    """Regress the velocity field onto the conditional path velocity for one batch.
+    target_noise: float = 0.0,
+):
+    """Draw one time per example and interpolate along the conditional path.
+
+    With ``target_noise`` the t=1 end becomes a small cloud around the text prototype
+    instead of a single atom. The target distribution is otherwise only ``num_classes``
+    points, which pushes the flow to collapse every embedding onto their barycentre.
 
     Args:
-        model: The wrapped velocity field.
-        path: The probability path supplying ``x_t`` and ``dx_t``.
+        path: The probability path.
         x_0: Source embeddings of shape ``(batch, embed_dim)``.
         x_1: Target embeddings of shape ``(batch, embed_dim)``.
-        generator: CPU generator making the time sampling reproducible.
+        generator: CPU generator making the sampling reproducible.
+        target_noise: Standard deviation of the Gaussian smoothing on ``x_1``.
 
     Returns:
-        The mean squared error between the predicted and the conditional velocity.
+        The path sample, exposing ``x_t``, ``dx_t`` and ``t``.
     """
+    if target_noise > 0.0:
+        noise = torch.randn(x_1.shape, generator=generator).to(x_1.device)
+        x_1 = x_1 + target_noise * noise
     t = torch.rand(x_0.shape[0], generator=generator).to(x_0.device)
-    sample = path.sample(t=t, x_0=x_0, x_1=x_1)
-    return nn.functional.mse_loss(model(x=sample.x_t, t=sample.t), sample.dx_t)
+    return path.sample(t=t, x_0=x_0, x_1=x_1)
+
+
+def predicted_endpoint(x_t: Tensor, t: Tensor, velocity: Tensor) -> Tensor:
+    """Extrapolate the t=1 endpoint from a single velocity evaluation.
+
+    On a straight path the velocity is constant, so ``x_1 = x_t + (1 - t) * v``. This gives
+    a differentiable endpoint without unrolling the ODE, which is what lets the layer be
+    trained against the classification metric directly.
+
+    Args:
+        x_t: States of shape ``(batch, embed_dim)``.
+        t: Times of shape ``(batch,)``.
+        velocity: Predicted velocities of shape ``(batch, embed_dim)``.
+
+    Returns:
+        Estimated endpoints of shape ``(batch, embed_dim)``.
+    """
+    return x_t + (1.0 - t).reshape(-1, 1) * velocity
+
+
+def cosine_logits(
+    features: Tensor, prototypes: Tensor, temperature: float = TEMPERATURE
+) -> Tensor:
+    """Score embeddings against class prototypes with a temperature-scaled cosine.
+
+    Args:
+        features: Embeddings of shape ``(batch, embed_dim)``.
+        prototypes: Class prototypes of shape ``(num_classes, embed_dim)``.
+        temperature: Softmax temperature applied to the cosine similarities.
+
+    Returns:
+        Logits of shape ``(batch, num_classes)``.
+    """
+    normalized = nn.functional.normalize(features, dim=-1, eps=EPSILON)
+    targets = nn.functional.normalize(prototypes, dim=-1, eps=EPSILON)
+    return (normalized @ targets.T) / temperature
+
