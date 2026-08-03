@@ -53,6 +53,7 @@ are missing, so this notebook runs standalone.
             f"""
 !git clone {REPO_URL}
 %cd flow-matching-as-a-layer
+!git checkout asaf/stage2
 """
         ),
         code(

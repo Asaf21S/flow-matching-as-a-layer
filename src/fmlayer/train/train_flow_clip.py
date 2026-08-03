@@ -40,6 +40,7 @@ WEIGHT_DECAY = 1e-4
 BATCH_SIZE = 256
 MAX_EPOCHS = 300
 EVAL_EVERY = 10
+PRINT_EVERY = 50
 # Weight of the endpoint cross-entropy added to the flow-matching regression. Pure CFM
 # regresses onto a barycentre of prototypes, which is the worst possible place for a cosine
 # 1-NN; this term makes the layer optimise the metric it is scored on.
@@ -149,6 +150,7 @@ def train_flow(
     target_noise: float = TARGET_NOISE,
     renormalize: bool = RENORMALIZE,
     verbose: bool = True,
+    progress_desc: str | None = None,
 ) -> tuple[ClipFlowWrapper, list[dict], int, float]:
     """Fit the velocity field, selecting both the epoch and the stopping time on validation.
 
@@ -177,6 +179,7 @@ def train_flow(
         target_noise: Gaussian smoothing of the t=1 target.
         renormalize: Keep the validation integration on the unit sphere.
         verbose: Print per-epoch losses and validation accuracy.
+        progress_desc: Label of this run's own tqdm bar; ``None`` disables it.
 
     Returns:
         The field at its best checkpoint, the history, the best epoch and the time that
@@ -198,7 +201,8 @@ def train_flow(
     best_time = 1.0
     num_train = len(source)
 
-    for epoch in range(1, max_epochs + 1):
+    epochs = tqdm(range(1, max_epochs + 1), desc=progress_desc, leave=False) if progress_desc else range(1, max_epochs + 1)
+    for epoch in epochs:
         model.train()
         order = torch.randperm(num_train, generator=generator).to(device)
         flow_total = 0.0
@@ -252,7 +256,7 @@ def train_flow(
             entry["val_time"] = float(val_grid[index])
             entry["val_accuracy_t1"] = accuracies[-1]
 
-            if verbose:
+            if verbose and (epoch % PRINT_EVERY == 0 or epoch == max_epochs):
                 print(
                     f"  epoch {epoch:3d}  flow {entry['flow_loss']:.4f}  "
                     f"ce {entry['class_loss']:.4f}  "
@@ -268,7 +272,7 @@ def train_flow(
                     key: value.detach().clone()
                     for key, value in model.state_dict().items()
                 }
-        elif verbose and epoch % 10 == 0:
+        elif verbose and epoch % PRINT_EVERY == 0:
             print(
                 f"  epoch {epoch:3d}  flow {entry['flow_loss']:.4f}  "
                 f"ce {entry['class_loss']:.4f}"
@@ -413,6 +417,7 @@ def run_flow_clip(
         target_noise=target_noise,
         renormalize=renormalize,
         verbose=verbose,
+        progress_desc=f"{dataset}/seed{seed}",
     )
     model.eval()
 
