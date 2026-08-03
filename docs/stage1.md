@@ -15,6 +15,20 @@ outputs and stored in `docs/figures/`.
 
 ---
 
+## Dataset Examples
+
+**DTD** — 47 classes. Labels describe a repeating visual pattern rather than an object, and the
+images vary widely in scale, colour and material.
+
+![DTD examples](figures/dtd_samples.png)
+
+**FGVC-Aircraft** — 100 classes at the variant level. Labels identify a specific model, so many
+classes share an almost identical silhouette.
+
+![FGVC-Aircraft examples](figures/aircrafts_samples.png)
+
+---
+
 ## 1. Accuracy Table
 
 Mean +/- std over 3 runs. For K = 5 and K = 10 the seeds select the balanced subset; for
