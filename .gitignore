@@ -223,13 +223,16 @@ features/             # cached frozen-encoder features (.npz)
 results/              # runs.csv, figures, checkpoints
 checkpoints/
 *.npz
-!docs/**
 
 requirements-dev.txt
 
 .idea/
-docs/
 .github/
 extract_pdf.py
+
+# docs/ is private except the per-stage result write-ups and their figures
+docs/*
+!docs/stage1.md
+!docs/figures/
 
 myenv
