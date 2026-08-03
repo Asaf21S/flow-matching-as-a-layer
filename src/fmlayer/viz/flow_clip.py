@@ -15,6 +15,7 @@ from src.fmlayer.models.flow_ode import DEFAULT_METHOD, DEFAULT_STEPS, MANUAL_EU
 from src.fmlayer.models.retrieval import nearest_neighbors
 from src.fmlayer.train.train_flow_clip import (
     ENCODER,
+    RENORMALIZE,
     curves_path,
     load_clip_features,
     load_flow_checkpoint,
@@ -26,6 +27,7 @@ from src.fmlayer.viz.figures import apply_plot_style, save_figure
 FLOW_COLOR = "#7b2cbf"
 ZEROSHOT_COLOR = "#d62728"
 ABLATION_COLOR = "#7f7f7f"
+BEST_TIME_COLOR = "#1a7f37"
 STEP_COLORS = ("#c4b5fd", "#7b2cbf", "#3b0764")
 SNAPSHOT_TIMES = (0.0, 0.25, 0.5, 0.75, 1.0)
 REVERSE_TIMES = (1.0, 0.75, 0.5, 0.25, 0.0)
@@ -140,10 +142,32 @@ def plot_combined_accuracy_vs_t(
     return save_figure(fig, "flow_accuracy_vs_t_combined", figures_root, show=show, save=save)
 
 
+def snapshot_times_around(best_time: float) -> tuple[float, ...]:
+    """Build 5 snapshot times that bracket the validation-selected stopping time.
+
+    The fixed (0, 0.25, 0.5, 0.75, 1) grid mostly shows the post-peak decay when the best
+    time sits at 0.1-0.2, so this spaces two points before the peak, the peak itself, and
+    two points spanning the decay back to t=1.
+
+    Args:
+        best_time: The stopping time selected on validation.
+
+    Returns:
+        Five increasing times in ``[0, 1]``, including ``best_time``.
+    """
+    return (
+        0.0,
+        round(best_time / 2, 4),
+        round(best_time, 4),
+        round((best_time + 1.0) / 2, 4),
+        1.0,
+    )
+
+
 def plot_trajectory_embeddings(
     dataset: str,
     seed: int = 0,
-    times: tuple[float, ...] = SNAPSHOT_TIMES,
+    times: tuple[float, ...] | None = None,
     num_classes: int = DEFAULT_NUM_CLASSES,
     method: str = DEFAULT_METHOD,
     steps: int = DEFAULT_STEPS,
@@ -151,6 +175,7 @@ def plot_trajectory_embeddings(
     results_root: Path | None = None,
     figures_root: Path | None = None,
     device: torch.device | None = None,
+    renormalize: bool = RENORMALIZE,
     show: bool = True,
     save: bool = False,
 ) -> Path | None:
@@ -158,8 +183,30 @@ def plot_trajectory_embeddings(
 
     The PCA basis is fitted once on the t=0 frame and reused for every later frame, so the
     panels share one coordinate system and the motion is real rather than a re-projection.
+
+    Args:
+        dataset: Dataset key.
+        seed: Run seed whose checkpoint and curve are used.
+        times: Snapshot times; defaults to 5 points bracketing the validation-selected
+            stopping time, since accuracy typically peaks well before t=1.
+        num_classes: Number of classes to draw; same subset as the Stage 1 embeddings.
+        method: Solver method.
+        steps: Euler sub-steps per unit of time.
+        feature_root: Feature cache directory; defaults to the resolved feature root.
+        results_root: Results directory; defaults to the resolved results root.
+        figures_root: Figure directory; defaults to the figures root.
+        device: Device to run the field on; defaults to CUDA when available.
+        renormalize: Keep the integration on the unit sphere, matching training.
+        show: Display the figure instead of closing it.
+        save: Write the figure to disk.
+
+    Returns:
+        Path of the saved figure, or ``None`` when ``save`` is ``False``.
     """
     apply_plot_style()
+    if times is None:
+        times = snapshot_times_around(load_curve(dataset, seed, results_root)["best_time"])
+
     model = load_flow_checkpoint(dataset, seed, results_root, device)
     class_ids = select_classes(dataset, num_classes)
 
@@ -177,6 +224,7 @@ def plot_trajectory_embeddings(
             time_grid,
             method,
             steps,
+            renormalize,
         )
         .cpu()
         .numpy()
@@ -193,6 +241,7 @@ def plot_trajectory_embeddings(
     colors = matplotlib.colormaps[COLORMAP]
     _, _, metadata = load_split(ENCODER, dataset, "test", feature_root)
     class_names = metadata["class_names"]
+    best_time = load_curve(dataset, seed, results_root)["best_time"]
 
     fig, axes = plt.subplots(1, len(times), figsize=(3.6 * len(times), 4.0))
     for ax, moment, frame in zip(np.atleast_1d(axes).ravel(), times, frames):
@@ -217,7 +266,13 @@ def plot_trajectory_embeddings(
                 linewidth=1.0,
                 zorder=5,
             )
-        ax.set_title(f"t = {moment:g}", pad=8)
+        is_operating_point = np.isclose(moment, best_time, atol=1e-3)
+        title = f"t = {moment:g}" + ("  (selected on val)" if is_operating_point else "")
+        ax.set_title(title, pad=8, color=BEST_TIME_COLOR if is_operating_point else "black")
+        if is_operating_point:
+            for spine in ax.spines.values():
+                spine.set_edgecolor(BEST_TIME_COLOR)
+                spine.set_linewidth(2.5)
         ax.set_xlim(low[0] - margin[0], high[0] + margin[0])
         ax.set_ylim(low[1] - margin[1], high[1] + margin[1])
         ax.set_xticks([])
