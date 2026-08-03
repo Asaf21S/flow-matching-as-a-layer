@@ -100,11 +100,16 @@ selected checkpoint.
 
 ![Training curves](figures/curves_combined_k10_seed0.png)
 
-- Training is stable: the train loss falls smoothly, with no oscillation at lr 1e-3.
-- Overfitting scales with the amount of data. On DTD the full-split runs peak very early
-  (epochs 12-30) and only overfit afterwards, while the DINOv2 few-shot runs peak late
-  (140-193). On Aircraft even the full-split runs peak late (157-175), so 200 epochs is not
-  excessive there.
+- Training is stable: the train loss falls smoothly and monotonically at lr 1e-3, with no
+  oscillation or divergence in any of the three cells.
+- The train loss reaches ~0 while the validation loss bottoms out early (around epoch 30 for
+  ResNet-18, epoch 15 for DINOv2) and then rises steadily — the classic overfitting signature.
+- **Does substantial overfitting occur? In the loss yes, in the metric no.** Validation accuracy
+  rises quickly and then stays flat (~0.50 DTD/ResNet-18, ~0.26 Aircraft, ~0.69 DTD/DINOv2)
+  instead of degrading. The probe grows overconfident on examples it already classifies
+  correctly, which inflates cross-entropy without flipping the argmax. Since checkpointing uses
+  validation accuracy, the selected epochs land late (32, 196, 168) and test accuracy is
+  essentially unaffected.
 
 ---
 
@@ -140,12 +145,16 @@ The projection is fitted jointly on the features and prototypes shown.
 ![Aircraft PCA](figures/embeddings_aircraft_pca.png)
 
 - DINOv2's DTD clusters are tighter than ResNet-18's, matching the accuracy gap.
-- Prototypes project further from the origin than their point clouds. This is geometric, not a
-  bug: a prototype is `normalize(mean(normalize(z)))`, a unit vector, while the mean of
-  unit-norm features lies inside the sphere.
-- CLIP's text prototypes sit apart from the image cloud — the known CLIP *modality gap*.
-  Classification still works, since only relative cosine ordering matters.
-- 2-D plots are qualitative only, not a measure of accuracy.
+- **CLIP's text prototypes sit in a separate region from the image cloud — the *modality gap*.**
+  CLIP encodes images and text with two different networks, and its contrastive objective only
+  constrains *relative* similarity: it needs `cos(image_i, text_i)` to beat
+  `cos(image_i, text_j)`, which stays true if every text embedding is shifted together. Nothing
+  in the loss pulls the two modalities onto each other, so they settle into two narrow, almost
+  disjoint cones — even a correctly matched image/text pair typically reaches only ~0.2-0.3
+  cosine similarity, not ~1.0. Classification is unaffected because that shared offset adds
+  roughly the same amount to every class score, so the argmax is still decided by the
+  differences *among* the text prototypes. In PCA the gap is the largest single direction of
+  variance, so PC1 is spent separating text from images rather than separating classes.
 
 ---
 
@@ -157,4 +166,3 @@ restored from Drive, the download and extraction cells can be skipped.
 Subset indices are sampled with `np.random.default_rng(seed)` and persisted, so all encoders
 see identical K-shot subsets; initialization and batching are seeded per run; features are
 extracted with `shuffle=False` so cached rows stay aligned with labels.
-
