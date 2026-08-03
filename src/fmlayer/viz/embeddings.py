@@ -183,9 +183,9 @@ def plot_embedding(
                 zorder=4,
             )
 
-    markers = f"★ = {prototype_label}"
+    markers = f"stars = {prototype_label}"
     if show_class_means:
-        markers += ", ✖ = projected mean"
+        markers += ", crosses = projected class mean"
     enc_label = ENCODER_LABELS.get(encoder, encoder)
     ax.set_title(
         f"{get_spec(dataset).display_name}: {enc_label} 2D Feature Projection ({method.upper()})\n({markers})",

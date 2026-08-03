@@ -82,7 +82,7 @@ def save_figure(
     """
     path = None
     if save and name:
-        root = Path(figures_root) if figures_root is not None else default_results_root()
+        root = Path(figures_root) if figures_root is not None else default_figures_root()
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"{name}.png"
         fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
