@@ -10,6 +10,7 @@ from src.fmlayer.models.zeroshot import METHOD as ZEROSHOT_METHOD
 from src.fmlayer.train.train_linear import METHOD as PROBE_METHOD
 from src.fmlayer.viz.figures import (
     ENCODER_COLORS,
+    FM_ENCODER_COLORS,
     ENCODER_LABELS,
     ENCODER_MARKERS,
     apply_plot_style,
@@ -32,31 +33,37 @@ def plot_combined_accuracy_vs_k(
     """Plot accuracy vs K for all datasets together side-by-side in a single combined figure."""
     apply_plot_style()
     datasets = datasets if datasets is not None else ["dtd", "aircraft"]
-    fig, axes = plt.subplots(1, len(datasets), figsize=(13, 5))
+    fig, axes = plt.subplots(1, len(datasets), figsize=(9.5, 4))
     if len(datasets) == 1:
         axes = [axes]
 
     for ax, dataset in zip(axes, datasets):
         subset = table[table["dataset"] == dataset]
-        probes = subset[subset["method"] == PROBE_METHOD]
-        for encoder, rows in probes.groupby("encoder"):
+        probes = subset[subset["method"] != ZEROSHOT_METHOD]
+        for (method, encoder), rows in probes.groupby(["method", "encoder"]):
             rows = rows.copy()
             rows["position"] = rows["k"].map(k_position)
             rows = rows.sort_values("position")
-            color = ENCODER_COLORS.get(encoder, "#333333")
+            if method == PROBE_METHOD:
+                color = ENCODER_COLORS.get(encoder, "#333333")
+            else:
+                color = FM_ENCODER_COLORS.get(encoder, "#333333")
             marker = ENCODER_MARKERS.get(encoder, "o")
-            label = ENCODER_LABELS.get(encoder, encoder)
+            base_label = ENCODER_LABELS.get(encoder, encoder)
+            ls = "-" if method == PROBE_METHOD else "--"
+            method_title = "Linear probe" if method == PROBE_METHOD else "Stage 3"
             ax.errorbar(
                 rows["position"],
                 rows["mean"],
                 yerr=rows["std"],
                 marker=marker,
                 color=color,
+                linestyle=ls,
                 linewidth=2,
                 markersize=7,
                 capsize=5,
                 capthick=1.5,
-                label=f"Linear probe ({label})",
+                label=f"{method_title} ({base_label})",
             )
 
         zeroshot = subset[subset["method"] == ZEROSHOT_METHOD]
@@ -92,27 +99,33 @@ def plot_accuracy_vs_k(
     """Plot accuracy vs K for a single dataset."""
     apply_plot_style()
     subset = table[table["dataset"] == dataset]
-    fig, ax = plt.subplots(figsize=(7, 4.8))
+    fig, ax = plt.subplots(figsize=(5.5, 3.8))
 
-    probes = subset[subset["method"] == PROBE_METHOD]
-    for encoder, rows in probes.groupby("encoder"):
+    probes = subset[subset["method"] != ZEROSHOT_METHOD]
+    for (method, encoder), rows in probes.groupby(["method", "encoder"]):
         rows = rows.copy()
         rows["position"] = rows["k"].map(k_position)
         rows = rows.sort_values("position")
-        color = ENCODER_COLORS.get(encoder, "#333333")
+        if method == PROBE_METHOD:
+            color = ENCODER_COLORS.get(encoder, "#333333")
+        else:
+            color = FM_ENCODER_COLORS.get(encoder, "#333333")
         marker = ENCODER_MARKERS.get(encoder, "o")
-        label = ENCODER_LABELS.get(encoder, encoder)
+        base_label = ENCODER_LABELS.get(encoder, encoder)
+        ls = "-" if method == PROBE_METHOD else "--"
+        method_title = "Linear probe" if method == PROBE_METHOD else "Stage 3"
         ax.errorbar(
             rows["position"],
             rows["mean"],
             yerr=rows["std"],
             marker=marker,
             color=color,
+            linestyle=ls,
             linewidth=2,
             markersize=7,
             capsize=5,
             capthick=1.5,
-            label=f"Linear probe ({label})",
+            label=f"{method_title} ({base_label})",
         )
 
     zeroshot = subset[subset["method"] == ZEROSHOT_METHOD]

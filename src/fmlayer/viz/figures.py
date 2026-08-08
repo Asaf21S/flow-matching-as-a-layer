@@ -9,7 +9,7 @@ from src.fmlayer.utils.results import default_results_root
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 FIGURES_DIRNAME = "figures"
-FIGURE_DPI = 180
+FIGURE_DPI = 100
 
 # Global Encoder Styling Standard
 ENCODER_COLORS = {
@@ -17,6 +17,13 @@ ENCODER_COLORS = {
     "dinov2_vits14": "#2ca02c",  # Standard Green
     "clip_rn50": "#d62728",      # Standard Crimson Red
 }
+
+FM_ENCODER_COLORS = {
+    "resnet18": "#64b5f6",       # Brighter Blue
+    "dinov2_vits14": "#81c784",  # Brighter Green
+    "clip_rn50": "#e57373",      # Brighter Red
+}
+
 
 ENCODER_MARKERS = {
     "resnet18": "o",
