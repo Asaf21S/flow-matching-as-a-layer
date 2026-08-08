@@ -8,6 +8,7 @@ from src.fmlayer.data.fewshot import K_FULL
 from src.fmlayer.data.specs import get_spec
 from src.fmlayer.models.zeroshot import METHOD as ZEROSHOT_METHOD
 from src.fmlayer.train.train_linear import METHOD as PROBE_METHOD
+from src.fmlayer.train.train_fm import METHOD as FM_METHOD
 from src.fmlayer.viz.figures import (
     ENCODER_COLORS,
     FM_ENCODER_COLORS,
@@ -39,7 +40,7 @@ def plot_combined_accuracy_vs_k(
 
     for ax, dataset in zip(axes, datasets):
         subset = table[table["dataset"] == dataset]
-        probes = subset[subset["method"] != ZEROSHOT_METHOD]
+        probes = subset[subset["method"].isin([PROBE_METHOD, FM_METHOD])]
         for (method, encoder), rows in probes.groupby(["method", "encoder"]):
             rows = rows.copy()
             rows["position"] = rows["k"].map(k_position)
@@ -51,7 +52,7 @@ def plot_combined_accuracy_vs_k(
             marker = ENCODER_MARKERS.get(encoder, "o")
             base_label = ENCODER_LABELS.get(encoder, encoder)
             ls = "-" if method == PROBE_METHOD else "--"
-            method_title = "Linear probe" if method == PROBE_METHOD else "Stage 3"
+            method_title = "Linear probe" if method == PROBE_METHOD else "FM + Linear Probe"
             ax.errorbar(
                 rows["position"],
                 rows["mean"],
@@ -101,7 +102,7 @@ def plot_accuracy_vs_k(
     subset = table[table["dataset"] == dataset]
     fig, ax = plt.subplots(figsize=(5.5, 3.8))
 
-    probes = subset[subset["method"] != ZEROSHOT_METHOD]
+    probes = subset[subset["method"].isin([PROBE_METHOD, FM_METHOD])]
     for (method, encoder), rows in probes.groupby(["method", "encoder"]):
         rows = rows.copy()
         rows["position"] = rows["k"].map(k_position)
@@ -113,7 +114,7 @@ def plot_accuracy_vs_k(
         marker = ENCODER_MARKERS.get(encoder, "o")
         base_label = ENCODER_LABELS.get(encoder, encoder)
         ls = "-" if method == PROBE_METHOD else "--"
-        method_title = "Linear probe" if method == PROBE_METHOD else "Stage 3"
+        method_title = "Linear probe" if method == PROBE_METHOD else "FM + Linear Probe"
         ax.errorbar(
             rows["position"],
             rows["mean"],
