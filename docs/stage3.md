@@ -1,53 +1,50 @@
-# Stage 3: Flow Matching as a Layer Before a Linear Probe
+# Stage 3 Results: Decoupled Flow Matching as a Pre-Classifier Layer
 
-In Stage 3, we extend the traditional linear probing paradigm by introducing a **Flow Matching Layer** prior to the linear classifier. This leverages the principles of Continuous Normalizing Flows and Conditional Flow Matching (CFM) to learn a continuous, non-linear transformation that refines frozen features from upstream encoders (such as CLIP) before classification.
+Produced by `notebooks/flow_matching_layer.ipynb`.
 
-## 1. Mathematical Formulation
+A continuous normalizing flow (Conditional Flow Matching) layer is trained to transport frozen image embeddings (e.g., from CLIP or DINOv2) at $t=0$ to their respective unnormalized class centroids at $t=1$. The Flow Matching (FM) layer acts as a decoupled feature refinement module, completely separate from the downstream classification layer.
 
-### 1.1 The ODE Forward Pass
-Given a frozen feature embedding $z_0 \in \mathbb{R}^d$ extracted from an upstream encoder, the Flow Matching layer transforms it via an Ordinary Differential Equation (ODE). We define a time-dependent vector field $v_\theta(z_t, t)$, parameterized by a neural network with weights $\theta$. The transformation of the feature over time $t \in [0, 1]$ is governed by:
+At test time, the raw unlabelled embeddings are passed through the trained FM layer using $T$ Euler steps. The transformed representations are then classified by a standard frozen Linear Probe that was independently pre-trained on the raw dataset.
 
-$$ \frac{d z_t}{d t} = v_\theta(z_t, t) $$
+## 1. Method
 
-To obtain the final transformed representation $\tilde{z}$, we integrate this vector field from $t = 0$ to $t = 1$:
+### The Decoupled Architecture
+Unlike joint training approaches that require backpropagating gradients through the entire ODE integration path during every training step, our decoupled approach operates in two computationally lightweight phases:
+1. **Flow Matching (CFM) Target:** We compute the exact unnormalized class centroids of the training set. We use the Conditional Flow Matching (CFM) objective to regress a straight-line vector field from the input sample $z_0$ towards its corresponding centroid $c_y$:
+    $$ z_t = (1 - t) z_0 + t c_y $$
+    $$ v(z_t, t) = c_y - z_0 $$
+    $$ \mathcal{L}_{\text{FM}} = || v_\theta(z_t, t) - (c_y - z_0) ||^2 $$
+    This requires only **$O(1)$ forward passes per batch** during training, making it exceptionally fast.
 
-$$ \tilde{z} = z_1 = z_0 + \int_0^1 v_\theta(z_t, t) dt $$
+2. **Frozen Linear Probe:** We train a standard Linear Probe independently on the raw $z_0$ embeddings. During the Flow Matching training phase, this probe is kept completely frozen. The flow layer's entire objective is to cluster the features optimally so that the existing Linear Probe becomes more effective.
 
-In practice, this integration is performed using a numerical ODE solver (e.g., the Euler method with a fixed number of steps).
+### Key Modifications and Fixes
+- **Unnormalized Centroids (Variance Maintenance):** Earlier implementations L2-normalized the class centroids. Since the downstream Linear Probe expects embeddings in their native coordinate scale, feeding it L2-normalized unit-vectors pushed the representations out-of-distribution, devastating accuracy. Centroids are now computed organically.
+- **T=12 Euler Integration:** ODE rollout is evaluated using $T=12$ Euler integration steps to accurately track the discrete vector field trajectory.
+- **Identity Initialization:** The output projection layer of the MLP is zero-initialized, ensuring the flow starts as an exact identity mapping ($v(x, t) = 0$).
 
-### 1.2 Downstream Classification
-Once the representation is transformed, we pass $\tilde{z}$ through a standard multi-class linear probe classifier with weights $W$ and bias $b$ to obtain the logits $s$:
+---
 
-$$ s = W \tilde{z} + b $$
+## 2. Visualizations and Diagnostics
 
-The entire forward pass can therefore be written as:
-$$ z_0 \xrightarrow{\text{ODE Solve}} \tilde{z} \xrightarrow{\text{Linear}} s $$
+To understand the topological changes induced by the flow, we project the high-dimensional embeddings into 2D PCA space.
 
-## 2. Two-Stage Training Pipeline
+### The Vector Field
+![Vector Field](figures/flow_vector_field_t0.png)
+*Figure 1: The learned vector field at $t=0.0$. The field points directly towards the class centroids, pulling scattered features inward.*
 
-To optimize the composite model, the training procedure (implemented in `src.fmlayer.train.train_fm.py`) is divided into two distinct phases.
+### ODE Flow Trajectories
+![Trajectories](figures/flow_trajectories_2d.png)
+*Figure 2: Sample trajectories from $z_0$ to $z_1$. The $T=12$ Euler integration steps are visible as discrete markers. Under the CFM objective, the network correctly learns straight-line paths toward the semantic center of the class.*
 
-### Phase 1: Pretraining the Vector Field (Conditional Flow Matching)
-We first train the vector field $v_\theta$ to transport the initial embeddings $z_0$ towards idealized target representations. For a given training sample with class $c$, the target $x_1$ is defined as the $L_2$-normalized centroid of all training embeddings belonging to class $c$.
+### Before vs. After Embeddings
+![Before/After Embeddings](figures/flow_before_after_pca.png)
+*Figure 3: Side-by-side 2D PCA representation of the raw features (left) vs. the flow-transformed test features (right). Note that the embeddings appear nearly identical.*
 
-We define the optimal straight-line trajectory between $x_0$ (the starting feature) and $x_1$ (the class centroid) as:
-$$ x_t = (1 - t)x_0 + t x_1 $$
+### Current Limitations and Overfitting
+As seen in Figure 3, the model fails to meaningfully map test samples to their class centroids, and instead falls back to an identity mapping ($z_1 \approx z_0$). This happens due to a severe **overfitting** issue in the current unnormalized architecture:
+1. The 2-layer MLP (with ~787k parameters) perfectly memorizes the vector field for the tiny unnormalized training set (e.g., 470 samples), pulling them exactly to their centroids.
+2. For unseen validation and test features, this overfitted model predicts highly chaotic and inaccurate vector fields, pushing them into random directions and causing downstream Linear Probe accuracy to plummet.
+3. The training loop correctly detects this massive drop in validation accuracy and restores the model from an early epoch (e.g., Epoch 10), when the network is barely trained and simply predicts $v \approx 0$. 
 
-The corresponding target vector field is constant with respect to time:
-$$ u_t(x_0, x_1) = x_1 - x_0 $$
-
-The network is trained using the Conditional Flow Matching (CFM) objective, which minimizes the expected $L_2$ difference between the predicted vector field and the target vector field:
-$$ \mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t \sim \mathcal{U}(0,1), (x_0, x_1)} \left[ \left\| v_\theta(x_t, t) - (x_1 - x_0) \right\|^2 \right] $$
-
-### Phase 2: End-to-End Classifier Training
-After the vector field is pretrained, we freeze $\theta$ (or train it jointly) and train the downstream linear classifier parameters $W$ and $b$. We minimize the standard Cross-Entropy loss over the logits:
-$$ \mathcal{L}_{\text{CE}}(W, b) = - \mathbb{E}_{(z_0, y)} \left[ \log \frac{\exp((W \tilde{z} + b)_y)}{\sum_j \exp((W \tilde{z} + b)_j)} \right] $$
-where $\tilde{z}$ is generated by integrating the pretrained flow network for the feature $z_0$, and $y$ is the ground-truth label.
-
-## 3. Visualizations and Diagnostics
-
-To rigorously evaluate the topological changes induced by the flow, Stage 3 includes a suite of 2D PCA-based visualization tools (located in `src.fmlayer.viz.flow_viz`):
-
-1. **Vector Field Streamlines**: We project the continuous vector field $v_\theta(z_t, t)$ onto the first two principal components of the feature space, allowing us to inspect the directional forces applied to embeddings at specific times $t$.
-2. **ODE Flow Trajectories**: By plotting the integration paths of individual samples as they traverse from $z_0$ to $z_1$, we can observe how the flow clusters initially entangled representations into distinct class modes.
-3. **Distribution Shift Comparisons**: Scatter plots of the raw representations ($z_0$) side-by-side with the flow-transformed representations ($z_1$) quantify the increase in linear separability.
+To fix this and build a robust representation layer, future iterations should **L2-normalize** all features before training (to constrain the latent manifold to a unit hypersphere, preventing wild divergence) and train the Linear Probe on those normalized features. Alternative approaches like targeting a Gaussian distribution $\mathcal{N}(c, \sigma^2 I)$ or Minibatch Optimal Transport (OT-CFM) could also help preserve topology.

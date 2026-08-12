@@ -2,18 +2,17 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch import nn
 from sklearn.decomposition import PCA
 
 from src.fmlayer.data.class_names import normalize_class_name
 from src.fmlayer.encoders.base import default_device
-from src.fmlayer.models.stage3 import Stage3
-from src.fmlayer.models.prototypes import l2_normalize
 from src.fmlayer.viz.embeddings import COLORMAP, DEFAULT_NUM_CLASSES, select_classes
 from src.fmlayer.viz.figures import apply_plot_style, save_figure
 
 
 def plot_flow_vector_field_2d(
-    model: Stage3,
+    fm_layer: nn.Module,
     features: np.ndarray,
     labels: np.ndarray,
     metadata: dict,
@@ -33,7 +32,7 @@ def plot_flow_vector_field_2d(
 
     class_ids = class_ids if class_ids is not None else select_classes(dataset, DEFAULT_NUM_CLASSES)
     mask = np.isin(labels, class_ids)
-    features_sub = l2_normalize(features[mask])
+    features_sub = features[mask]
     labels_sub = labels[mask]
 
     pca = PCA(n_components=2, random_state=0)
@@ -50,9 +49,9 @@ def plot_flow_vector_field_2d(
     grid_high = pca.inverse_transform(grid_2d)
     grid_tensor = torch.from_numpy(grid_high).float().to(device)
 
-    model.eval()
+    fm_layer.eval()
     with torch.no_grad():
-        v_high = model.fm_layer.vector_field(grid_tensor, t).cpu().numpy()
+        v_high = fm_layer(grid_tensor, t).cpu().numpy()
 
     # Project high-dimensional velocity onto PCA principal components
     v_2d = v_high @ pca.components_.T
@@ -102,12 +101,12 @@ def plot_flow_vector_field_2d(
 
 
 def plot_flow_trajectories_2d(
-    model: Stage3,
+    fm_layer: nn.Module,
     features: np.ndarray,
     labels: np.ndarray,
     metadata: dict,
     class_ids: np.ndarray | None = None,
-    num_steps: int = 10,
+    num_steps: int = 12,
     samples_per_class: int = 2,
     device: torch.device | None = None,
     figures_root: str | None = None,
@@ -130,7 +129,7 @@ def plot_flow_trajectories_2d(
         if len(c_idxs) > 0:
             sample_indices.extend(rng.choice(c_idxs, size=min(samples_per_class, len(c_idxs)), replace=False))
 
-    sample_features = l2_normalize(features[sample_indices])
+    sample_features = features[sample_indices]
     sample_labels = labels[sample_indices]
 
     # Integrate Euler steps and record trajectory states
@@ -138,11 +137,11 @@ def plot_flow_trajectories_2d(
     z_tensor = torch.from_numpy(sample_features).float().to(device)
     trajectories = [z_tensor.cpu().numpy()]
 
-    model.eval()
+    fm_layer.eval()
     with torch.no_grad():
         for i in range(num_steps):
             t = i * dt
-            v = model.fm_layer.vector_field(z_tensor, t)
+            v = fm_layer(z_tensor, t)
             z_tensor = z_tensor + v * dt
             trajectories.append(z_tensor.cpu().numpy())
 
@@ -163,7 +162,7 @@ def plot_flow_trajectories_2d(
         for idx in np.where(sample_mask)[0]:
             path = trajectories_2d[:, idx, :]  # (steps+1, 2)
             # Plot trajectory curve
-            ax.plot(path[:, 0], path[:, 1], color=color, linewidth=1.8, alpha=0.8)
+            ax.plot(path[:, 0], path[:, 1], color=color, linewidth=1.8, alpha=0.8, marker=".", markersize=4)
             # Start point (z0)
             ax.scatter(path[0, 0], path[0, 1], color=color, s=40, marker="o", edgecolors="black", linewidths=0.5)
             # End point (z1)
@@ -185,7 +184,7 @@ def plot_flow_trajectories_2d(
 
 
 def plot_before_after_embeddings(
-    model: Stage3,
+    fm_layer: nn.Module,
     features: np.ndarray,
     labels: np.ndarray,
     metadata: dict,
@@ -203,15 +202,16 @@ def plot_before_after_embeddings(
 
     class_ids = class_ids if class_ids is not None else select_classes(dataset, DEFAULT_NUM_CLASSES)
     mask = np.isin(labels, class_ids)
-    features_sub = l2_normalize(features[mask])
+    features_sub = features[mask]
     labels_sub = labels[mask]
 
+    from src.fmlayer.models.flow_ode import rollout
     # Transform features with Flow Matching layer
     z0_tensor = torch.from_numpy(features_sub).float().to(device)
-    model.eval()
+    fm_layer.eval()
     with torch.no_grad():
-        z1_tensor = model.fm_layer(z0_tensor)
-    z1_sub = l2_normalize(z1_tensor.cpu().numpy())
+        z1_tensor, _ = rollout(fm_layer, z0_tensor, 12)
+    z1_sub = z1_tensor.cpu().numpy()
 
     # Fit PCA jointly on z0 and z1
     pca = PCA(n_components=2, random_state=0)
