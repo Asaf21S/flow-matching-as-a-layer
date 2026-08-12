@@ -46,8 +46,9 @@ applicable at test time.
 | **Field** | MLP 1025 → 512 → 512 → 1024, SiLU, scalar t concatenated, zero-initialised output |
 | **Protocol** | K ∈ {5, 10, full} × 3 seeds, reusing the Stage 1 subsets — **54 trained fields** |
 
-Headline: +26.5 points on DTD (0.4005 → 0.6651) and +13.0 points on FGVC-Aircraft
-(0.1545 → 0.2845) over the zero-shot baseline, with the encoder and the prototypes both frozen.
+Headline: +26.6 points on DTD (0.4005 → 0.6668) and +17.5 points on FGVC-Aircraft
+(0.1545 → 0.3299) over the zero-shot baseline, with the encoder and the prototypes both frozen.
+Both come from rolled-out FM at T = 4, K = full.
 
 ---
 
@@ -102,9 +103,10 @@ src/fmlayer/
                     selected by highest validation accuracy, then evaluated on the test split.
                     Saves per-epoch histories and aggregates mean +/- std per setting.
     train_flow_clip.py
-                    Entry point: trains the FM layer under either objective. AdamW (lr 1e-3,
-                    wd 1e-4), batch 256, 300 epochs, checkpoint selected by validation accuracy
-                    of the T-step rollout. Sweeps K x seeds x T and records one row per T.
+                    Entry point: trains the FM layer under either objective. AdamW (lr 1e-3
+                    cosine-annealed to 1e-5, wd 1e-4), batch 256, 1000 epochs, checkpoint
+                    selected by validation accuracy of the T-step rollout. Sweeps K x seeds x T
+                    and records one row per T.
     evaluate.py     Top-1 accuracy, per-class accuracy, row-normalised confusion matrix.
 
   viz/

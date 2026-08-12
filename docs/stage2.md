@@ -17,7 +17,8 @@ with the same cosine 1-NN rule as the Stage 1 zero-shot baseline.
 | Euler steps | T in {4, 12} |
 | Protocol | K in {5, 10, full} x seeds {0, 1, 2}, reusing the Stage 1 subsets |
 | Field | MLP 1025 -> 512 -> 512 -> 1024, SiLU, scalar t concatenated (1.31 M params) |
-| Optimiser | AdamW, lr 1e-3 constant, wd 1e-4, batch 256, 300 epochs, best val accuracy |
+| Optimiser | AdamW, lr 1e-3 cosine-annealed to 1e-5, wd 1e-4, batch 256, 1000 epochs |
+| Selection | Checkpoint with the best mean validation rollout accuracy |
 | Metric | Top-1 accuracy on the complete official test split, at the endpoint `z_T` |
 | Runs | 54 trained fields -> 72 result rows (36 standard + 36 rolled-out) |
 
@@ -55,6 +56,7 @@ identical across the two objectives.
 |--------------------------------------------| --- |
 | Output layer zero-initialised              | Makes the untrained field the identity, so t=0 reproduces the Stage 1 baseline exactly. Every diagnostic run asserts `\|acc(t=0) - baseline\| < 5e-3`. |
 | Inputs L2-normalised once, before training | Stage 1 classifies with cosine, so length carries no class information, and CLIP's image and text towers have different norm scales. Without it `u_i = p_c - z_i` would be dominated by a length mismatch the classifier then discards. |
+| Cosine-annealed learning rate, 1000 epochs | A first pass at 300 epochs and a constant lr was under-trained - see Section 4. |
 
 ---
 
@@ -68,121 +70,122 @@ measured against the Stage 1 zero-shot baseline of the same dataset.
 
 | Variant | T | K | Top-1 accuracy | dAcc |
 | --- | --- | --- | --- | --- |
-| Standard FM | 4 | 5 | 0.5227 +/- 0.0100 | +0.1222 |
-| Standard FM | 12 | 5 | 0.5252 +/- 0.0090 | +0.1246 |
-| Rolled-out FM | 4 | 5 | 0.5236 +/- 0.0094 | +0.1230 |
-| Rolled-out FM | 12 | 5 | 0.5163 +/- 0.0080 | +0.1158 |
-| Standard FM | 4 | 10 | 0.5902 +/- 0.0025 | +0.1897 |
-| Standard FM | 12 | 10 | 0.5931 +/- 0.0019 | +0.1926 |
-| Rolled-out FM | 4 | 10 | 0.5915 +/- 0.0074 | +0.1910 |
-| Rolled-out FM | 12 | 10 | 0.5771 +/- 0.0024 | +0.1766 |
-| Standard FM | 4 | full | 0.6466 +/- 0.0016 | +0.2461 |
-| Standard FM | 12 | full | 0.6493 +/- 0.0029 | +0.2488 |
-| Rolled-out FM | 4 | full | **0.6651 +/- 0.0031** | **+0.2645** |
-| Rolled-out FM | 12 | full | 0.6642 +/- 0.0043 | +0.2637 |
+| Standard FM | 4 | 5 | 0.5309 +/- 0.0112 | +0.1303 |
+| Standard FM | 12 | 5 | 0.5335 +/- 0.0086 | +0.1330 |
+| Rolled-out FM | 4 | 5 | 0.5207 +/- 0.0148 | +0.1202 |
+| Rolled-out FM | 12 | 5 | 0.5234 +/- 0.0138 | +0.1229 |
+| Standard FM | 4 | 10 | 0.5943 +/- 0.0085 | +0.1938 |
+| Standard FM | 12 | 10 | 0.5934 +/- 0.0104 | +0.1929 |
+| Rolled-out FM | 4 | 10 | 0.5826 +/- 0.0078 | +0.1821 |
+| Rolled-out FM | 12 | 10 | 0.5853 +/- 0.0056 | +0.1848 |
+| Standard FM | 4 | full | 0.6473 +/- 0.0033 | +0.2468 |
+| Standard FM | 12 | full | 0.6518 +/- 0.0040 | +0.2512 |
+| Rolled-out FM | 4 | full | **0.6668 +/- 0.0011** | **+0.2663** |
+| Rolled-out FM | 12 | full | 0.6583 +/- 0.0027 | +0.2578 |
 
 ### FGVC-Aircraft (baseline 0.1545)
 
 | Variant | T | K | Top-1 accuracy | dAcc |
 | --- | --- | --- | --- | --- |
-| Standard FM | 4 | 5 | 0.1708 +/- 0.0046 | +0.0163 |
-| Standard FM | 12 | 5 | 0.1712 +/- 0.0026 | +0.0167 |
-| Rolled-out FM | 4 | 5 | 0.1651 +/- 0.0024 | +0.0106 |
-| Rolled-out FM | 12 | 5 | 0.1659 +/- 0.0031 | +0.0114 |
-| Standard FM | 4 | 10 | 0.2053 +/- 0.0072 | +0.0508 |
-| Standard FM | 12 | 10 | 0.2087 +/- 0.0049 | +0.0542 |
-| Rolled-out FM | 4 | 10 | 0.2074 +/- 0.0075 | +0.0529 |
-| Rolled-out FM | 12 | 10 | 0.2097 +/- 0.0095 | +0.0552 |
-| Standard FM | 4 | full | 0.2319 +/- 0.0044 | +0.0774 |
-| Standard FM | 12 | full | 0.2347 +/- 0.0060 | +0.0802 |
-| Rolled-out FM | 4 | full | **0.2845 +/- 0.0056** | **+0.1300** |
-| Rolled-out FM | 12 | full | 0.2542 +/- 0.0071 | +0.0997 |
+| Standard FM | 4 | 5 | 0.1731 +/- 0.0031 | +0.0186 |
+| Standard FM | 12 | 5 | 0.1741 +/- 0.0054 | +0.0196 |
+| Rolled-out FM | 4 | 5 | 0.1675 +/- 0.0041 | +0.0130 |
+| Rolled-out FM | 12 | 5 | 0.1670 +/- 0.0022 | +0.0125 |
+| Standard FM | 4 | 10 | 0.2151 +/- 0.0087 | +0.0606 |
+| Standard FM | 12 | 10 | 0.2144 +/- 0.0079 | +0.0599 |
+| Rolled-out FM | 4 | 10 | 0.2279 +/- 0.0026 | +0.0734 |
+| Rolled-out FM | 12 | 10 | 0.2160 +/- 0.0042 | +0.0615 |
+| Standard FM | 4 | full | 0.2439 +/- 0.0047 | +0.0894 |
+| Standard FM | 12 | full | 0.2477 +/- 0.0017 | +0.0932 |
+| Rolled-out FM | 4 | full | **0.3299 +/- 0.0034** | **+0.1754** |
+| Rolled-out FM | 12 | full | 0.2952 +/- 0.0042 | +0.1407 |
 
-The layer helps everywhere. The best setting adds **+26.5 points on DTD**
-(0.4005 -> 0.6651, +66% relative) and **+13.0 points on Aircraft** (0.1545 -> 0.2845, +84%
+The layer helps everywhere. The best setting adds **+26.6 points on DTD**
+(0.4005 -> 0.6668, +66% relative) and **+17.5 points on Aircraft** (0.1545 -> 0.3299, +114%
 relative), and no cell in either table is below its baseline.
 
 <details>
 <summary>Per-run detail (72 rows), with the final training loss of each field</summary>
 
-`Loss` is the mean training loss at epoch 300 of the field that produced the row: a velocity
+`Loss` is the mean training loss at epoch 1000 of the field that produced the row: a velocity
 MSE for standard FM, an endpoint MSE for rolled-out FM. Standard rows share one field per
-(dataset, K, seed), hence one loss value across both step counts.
+(dataset, K, seed), hence one loss value across both step counts. The scored checkpoint is
+the best-validation one, which is not always the last epoch.
 
 | Variant | Dataset | K | Seed | T | Loss | Test acc | dAcc |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Standard | Aircraft | 5 | 0 | 4 | 0.000130 | 0.1677 | +0.0132 |
-| Standard | Aircraft | 5 | 0 | 12 | 0.000130 | 0.1713 | +0.0168 |
-| Rolled-out | Aircraft | 5 | 0 | 4 | 0.000105 | 0.1674 | +0.0129 |
-| Rolled-out | Aircraft | 5 | 0 | 12 | 0.000108 | 0.1695 | +0.0150 |
-| Standard | Aircraft | 5 | 1 | 4 | 0.000135 | 0.1761 | +0.0216 |
-| Standard | Aircraft | 5 | 1 | 12 | 0.000135 | 0.1737 | +0.0192 |
-| Rolled-out | Aircraft | 5 | 1 | 4 | 0.000108 | 0.1626 | +0.0081 |
-| Rolled-out | Aircraft | 5 | 1 | 12 | 0.000108 | 0.1644 | +0.0099 |
-| Standard | Aircraft | 5 | 2 | 4 | 0.000137 | 0.1686 | +0.0141 |
-| Standard | Aircraft | 5 | 2 | 12 | 0.000137 | 0.1686 | +0.0141 |
-| Rolled-out | Aircraft | 5 | 2 | 4 | 0.000102 | 0.1653 | +0.0108 |
-| Rolled-out | Aircraft | 5 | 2 | 12 | 0.000107 | 0.1638 | +0.0093 |
-| Standard | Aircraft | 10 | 0 | 4 | 0.000119 | 0.2124 | +0.0579 |
-| Standard | Aircraft | 10 | 0 | 12 | 0.000119 | 0.2112 | +0.0567 |
-| Rolled-out | Aircraft | 10 | 0 | 4 | 0.000096 | 0.2145 | +0.0600 |
-| Rolled-out | Aircraft | 10 | 0 | 12 | 0.000099 | 0.2178 | +0.0633 |
-| Standard | Aircraft | 10 | 1 | 4 | 0.000115 | 0.1980 | +0.0435 |
-| Standard | Aircraft | 10 | 1 | 12 | 0.000115 | 0.2031 | +0.0486 |
-| Rolled-out | Aircraft | 10 | 1 | 4 | 0.000097 | 0.1995 | +0.0450 |
-| Rolled-out | Aircraft | 10 | 1 | 12 | 0.000100 | 0.1992 | +0.0447 |
-| Standard | Aircraft | 10 | 2 | 4 | 0.000114 | 0.2055 | +0.0510 |
-| Standard | Aircraft | 10 | 2 | 12 | 0.000114 | 0.2118 | +0.0573 |
-| Rolled-out | Aircraft | 10 | 2 | 4 | 0.000093 | 0.2082 | +0.0537 |
-| Rolled-out | Aircraft | 10 | 2 | 12 | 0.000095 | 0.2121 | +0.0576 |
-| Standard | Aircraft | full | 0 | 4 | 0.000108 | 0.2349 | +0.0804 |
-| Standard | Aircraft | full | 0 | 12 | 0.000108 | 0.2403 | +0.0858 |
-| Rolled-out | Aircraft | full | 0 | 4 | 0.000091 | 0.2829 | +0.1284 |
-| Rolled-out | Aircraft | full | 0 | 12 | 0.000106 | 0.2562 | +0.1017 |
-| Standard | Aircraft | full | 1 | 4 | 0.000112 | 0.2340 | +0.0795 |
-| Standard | Aircraft | full | 1 | 12 | 0.000112 | 0.2355 | +0.0810 |
-| Rolled-out | Aircraft | full | 1 | 4 | 0.000088 | 0.2799 | +0.1254 |
-| Rolled-out | Aircraft | full | 1 | 12 | 0.000102 | 0.2601 | +0.1056 |
-| Standard | Aircraft | full | 2 | 4 | 0.000105 | 0.2268 | +0.0723 |
-| Standard | Aircraft | full | 2 | 12 | 0.000105 | 0.2283 | +0.0738 |
-| Rolled-out | Aircraft | full | 2 | 4 | 0.000090 | 0.2907 | +0.1362 |
-| Rolled-out | Aircraft | full | 2 | 12 | 0.000106 | 0.2463 | +0.0918 |
-| Standard | DTD | 5 | 0 | 4 | 0.000149 | 0.5340 | +0.1335 |
-| Standard | DTD | 5 | 0 | 12 | 0.000149 | 0.5351 | +0.1346 |
-| Rolled-out | DTD | 5 | 0 | 4 | 0.000079 | 0.5282 | +0.1277 |
-| Rolled-out | DTD | 5 | 0 | 12 | 0.000087 | 0.5245 | +0.1239 |
-| Standard | DTD | 5 | 1 | 4 | 0.000152 | 0.5154 | +0.1149 |
-| Standard | DTD | 5 | 1 | 12 | 0.000152 | 0.5176 | +0.1170 |
-| Rolled-out | DTD | 5 | 1 | 4 | 0.000077 | 0.5298 | +0.1293 |
-| Rolled-out | DTD | 5 | 1 | 12 | 0.000086 | 0.5160 | +0.1154 |
-| Standard | DTD | 5 | 2 | 4 | 0.000148 | 0.5186 | +0.1181 |
-| Standard | DTD | 5 | 2 | 12 | 0.000148 | 0.5229 | +0.1223 |
-| Rolled-out | DTD | 5 | 2 | 4 | 0.000077 | 0.5128 | +0.1122 |
-| Rolled-out | DTD | 5 | 2 | 12 | 0.000089 | 0.5085 | +0.1080 |
-| Standard | DTD | 10 | 0 | 4 | 0.000134 | 0.5888 | +0.1883 |
-| Standard | DTD | 10 | 0 | 12 | 0.000134 | 0.5926 | +0.1920 |
-| Rolled-out | DTD | 10 | 0 | 4 | 0.000065 | 0.5915 | +0.1910 |
-| Rolled-out | DTD | 10 | 0 | 12 | 0.000068 | 0.5750 | +0.1745 |
-| Standard | DTD | 10 | 1 | 4 | 0.000138 | 0.5931 | +0.1926 |
-| Standard | DTD | 10 | 1 | 12 | 0.000138 | 0.5952 | +0.1947 |
-| Rolled-out | DTD | 10 | 1 | 4 | 0.000066 | 0.5840 | +0.1835 |
-| Rolled-out | DTD | 10 | 1 | 12 | 0.000070 | 0.5766 | +0.1761 |
-| Standard | DTD | 10 | 2 | 4 | 0.000130 | 0.5888 | +0.1883 |
-| Standard | DTD | 10 | 2 | 12 | 0.000130 | 0.5915 | +0.1910 |
-| Rolled-out | DTD | 10 | 2 | 4 | 0.000064 | 0.5989 | +0.1984 |
-| Rolled-out | DTD | 10 | 2 | 12 | 0.000070 | 0.5798 | +0.1793 |
-| Standard | DTD | full | 0 | 4 | 0.000092 | 0.6463 | +0.2457 |
-| Standard | DTD | full | 0 | 12 | 0.000092 | 0.6463 | +0.2457 |
-| Rolled-out | DTD | full | 0 | 4 | 0.000040 | 0.6628 | +0.2622 |
-| Rolled-out | DTD | full | 0 | 12 | 0.000050 | 0.6596 | +0.2590 |
-| Standard | DTD | full | 1 | 4 | 0.000090 | 0.6452 | +0.2447 |
-| Standard | DTD | full | 1 | 12 | 0.000090 | 0.6495 | +0.2489 |
-| Rolled-out | DTD | full | 1 | 4 | 0.000039 | 0.6638 | +0.2633 |
-| Rolled-out | DTD | full | 1 | 12 | 0.000046 | 0.6681 | +0.2676 |
-| Standard | DTD | full | 2 | 4 | 0.000090 | 0.6484 | +0.2479 |
-| Standard | DTD | full | 2 | 12 | 0.000090 | 0.6521 | +0.2516 |
-| Rolled-out | DTD | full | 2 | 4 | 0.000039 | 0.6686 | +0.2681 |
-| Rolled-out | DTD | full | 2 | 12 | 0.000047 | 0.6649 | +0.2644 |
+| Standard | Aircraft | 5 | 0 | 4 | 0.000090 | 0.1716 | +0.0171 |
+| Standard | Aircraft | 5 | 0 | 12 | 0.000090 | 0.1701 | +0.0156 |
+| Rolled-out | Aircraft | 5 | 0 | 4 | 0.000056 | 0.1707 | +0.0162 |
+| Rolled-out | Aircraft | 5 | 0 | 12 | 0.000059 | 0.1656 | +0.0111 |
+| Standard | Aircraft | 5 | 1 | 4 | 0.000094 | 0.1767 | +0.0222 |
+| Standard | Aircraft | 5 | 1 | 12 | 0.000094 | 0.1803 | +0.0258 |
+| Rolled-out | Aircraft | 5 | 1 | 4 | 0.000058 | 0.1689 | +0.0144 |
+| Rolled-out | Aircraft | 5 | 1 | 12 | 0.000061 | 0.1695 | +0.0150 |
+| Standard | Aircraft | 5 | 2 | 4 | 0.000092 | 0.1710 | +0.0165 |
+| Standard | Aircraft | 5 | 2 | 12 | 0.000092 | 0.1719 | +0.0174 |
+| Rolled-out | Aircraft | 5 | 2 | 4 | 0.000057 | 0.1629 | +0.0084 |
+| Rolled-out | Aircraft | 5 | 2 | 12 | 0.000060 | 0.1659 | +0.0114 |
+| Standard | Aircraft | 10 | 0 | 4 | 0.000081 | 0.2250 | +0.0705 |
+| Standard | Aircraft | 10 | 0 | 12 | 0.000081 | 0.2235 | +0.0690 |
+| Rolled-out | Aircraft | 10 | 0 | 4 | 0.000048 | 0.2307 | +0.0762 |
+| Rolled-out | Aircraft | 10 | 0 | 12 | 0.000050 | 0.2202 | +0.0657 |
+| Standard | Aircraft | 10 | 1 | 4 | 0.000080 | 0.2115 | +0.0570 |
+| Standard | Aircraft | 10 | 1 | 12 | 0.000080 | 0.2100 | +0.0555 |
+| Rolled-out | Aircraft | 10 | 1 | 4 | 0.000048 | 0.2256 | +0.0711 |
+| Rolled-out | Aircraft | 10 | 1 | 12 | 0.000051 | 0.2118 | +0.0573 |
+| Standard | Aircraft | 10 | 2 | 4 | 0.000078 | 0.2088 | +0.0543 |
+| Standard | Aircraft | 10 | 2 | 12 | 0.000078 | 0.2097 | +0.0552 |
+| Rolled-out | Aircraft | 10 | 2 | 4 | 0.000047 | 0.2274 | +0.0729 |
+| Rolled-out | Aircraft | 10 | 2 | 12 | 0.000050 | 0.2160 | +0.0615 |
+| Standard | Aircraft | full | 0 | 4 | 0.000074 | 0.2394 | +0.0849 |
+| Standard | Aircraft | full | 0 | 12 | 0.000074 | 0.2457 | +0.0912 |
+| Rolled-out | Aircraft | full | 0 | 4 | 0.000029 | 0.3309 | +0.1764 |
+| Rolled-out | Aircraft | full | 0 | 12 | 0.000045 | 0.2910 | +0.1365 |
+| Standard | Aircraft | full | 1 | 4 | 0.000073 | 0.2436 | +0.0891 |
+| Standard | Aircraft | full | 1 | 12 | 0.000073 | 0.2487 | +0.0942 |
+| Rolled-out | Aircraft | full | 1 | 4 | 0.000028 | 0.3327 | +0.1782 |
+| Rolled-out | Aircraft | full | 1 | 12 | 0.000043 | 0.2994 | +0.1449 |
+| Standard | Aircraft | full | 2 | 4 | 0.000072 | 0.2487 | +0.0942 |
+| Standard | Aircraft | full | 2 | 12 | 0.000072 | 0.2487 | +0.0942 |
+| Rolled-out | Aircraft | full | 2 | 4 | 0.000029 | 0.3261 | +0.1716 |
+| Rolled-out | Aircraft | full | 2 | 12 | 0.000049 | 0.2952 | +0.1407 |
+| Standard | DTD | 5 | 0 | 4 | 0.000101 | 0.5415 | +0.1410 |
+| Standard | DTD | 5 | 0 | 12 | 0.000101 | 0.5415 | +0.1410 |
+| Rolled-out | DTD | 5 | 0 | 4 | 0.000033 | 0.5330 | +0.1324 |
+| Rolled-out | DTD | 5 | 0 | 12 | 0.000036 | 0.5346 | +0.1340 |
+| Standard | DTD | 5 | 1 | 4 | 0.000104 | 0.5319 | +0.1314 |
+| Standard | DTD | 5 | 1 | 12 | 0.000104 | 0.5346 | +0.1340 |
+| Rolled-out | DTD | 5 | 1 | 4 | 0.000033 | 0.5250 | +0.1245 |
+| Rolled-out | DTD | 5 | 1 | 12 | 0.000036 | 0.5277 | +0.1271 |
+| Standard | DTD | 5 | 2 | 4 | 0.000095 | 0.5191 | +0.1186 |
+| Standard | DTD | 5 | 2 | 12 | 0.000095 | 0.5245 | +0.1239 |
+| Rolled-out | DTD | 5 | 2 | 4 | 0.000033 | 0.5043 | +0.1037 |
+| Rolled-out | DTD | 5 | 2 | 12 | 0.000037 | 0.5080 | +0.1074 |
+| Standard | DTD | 10 | 0 | 4 | 0.000088 | 0.5856 | +0.1851 |
+| Standard | DTD | 10 | 0 | 12 | 0.000088 | 0.5830 | +0.1824 |
+| Rolled-out | DTD | 10 | 0 | 4 | 0.000030 | 0.5835 | +0.1830 |
+| Rolled-out | DTD | 10 | 0 | 12 | 0.000034 | 0.5862 | +0.1856 |
+| Standard | DTD | 10 | 1 | 4 | 0.000088 | 0.5947 | +0.1941 |
+| Standard | DTD | 10 | 1 | 12 | 0.000088 | 0.5936 | +0.1931 |
+| Rolled-out | DTD | 10 | 1 | 4 | 0.000030 | 0.5745 | +0.1739 |
+| Rolled-out | DTD | 10 | 1 | 12 | 0.000035 | 0.5793 | +0.1787 |
+| Standard | DTD | 10 | 2 | 4 | 0.000085 | 0.6027 | +0.2021 |
+| Standard | DTD | 10 | 2 | 12 | 0.000085 | 0.6037 | +0.2032 |
+| Rolled-out | DTD | 10 | 2 | 4 | 0.000030 | 0.5899 | +0.1894 |
+| Rolled-out | DTD | 10 | 2 | 12 | 0.000034 | 0.5904 | +0.1899 |
+| Standard | DTD | full | 0 | 4 | 0.000060 | 0.6484 | +0.2479 |
+| Standard | DTD | full | 0 | 12 | 0.000060 | 0.6516 | +0.2511 |
+| Rolled-out | DTD | full | 0 | 4 | 0.000011 | 0.6665 | +0.2660 |
+| Rolled-out | DTD | full | 0 | 12 | 0.000013 | 0.6580 | +0.2574 |
+| Standard | DTD | full | 1 | 4 | 0.000058 | 0.6500 | +0.2495 |
+| Standard | DTD | full | 1 | 12 | 0.000058 | 0.6559 | +0.2553 |
+| Rolled-out | DTD | full | 1 | 4 | 0.000010 | 0.6681 | +0.2676 |
+| Rolled-out | DTD | full | 1 | 12 | 0.000012 | 0.6612 | +0.2606 |
+| Standard | DTD | full | 2 | 4 | 0.000060 | 0.6436 | +0.2431 |
+| Standard | DTD | full | 2 | 12 | 0.000060 | 0.6479 | +0.2473 |
+| Rolled-out | DTD | full | 2 | 4 | 0.000011 | 0.6660 | +0.2654 |
+| Rolled-out | DTD | full | 2 | 12 | 0.000013 | 0.6559 | +0.2553 |
 
 </details>
 
@@ -196,22 +199,26 @@ Error bars are the std over 3 seeds.
 ![Flow accuracy vs K](figures/flow_accuracy_vs_k.png)
 
 - **The layer never hurts.** Even at K = 5 - 235 images on DTD, 500 on Aircraft - every
-  variant is above the baseline, and the gain is already large on DTD (+0.12, which is 46% of
+  variant is above the baseline, and the gain is already large on DTD (+0.13, which is 50% of
   the full-split gain).
-- **T barely matters for standard FM.** T=12 is ahead in all six standard cells, so the
-  finer discretisation does help - but by at most 0.0034, which is comparable to or below the
-  seed spread (0.0013 - 0.0100) in every one of them. The learned velocity is therefore close
-  to constant along the path: 4 Euler steps already resolve the map, and discretisation error
-  is not what limits accuracy.
-- **T matters for rolled-out FM, and fewer steps are better.** On Aircraft K = full,
-  T=4 scores 0.2845 against 0.2542 for T=12, a 0.030 gap that is ~5x the seed std. On DTD
-  K = 10 the same direction gives +0.014. T=4 is never meaningfully worse than T=12.
-- **Rolled-out training needs data.** It wins clearly only at K = full (+0.0158 on DTD,
-  +0.0498 on Aircraft over the best standard setting). At K = 5 it is level with or slightly
-  behind standard FM on both datasets - the endpoint objective has more freedom in how it
+- **T is irrelevant for standard FM.** The largest gap between T=4 and T=12 across the six
+  standard cells is 0.0045, and the direction is not systematic - T=12 is ahead in four cells,
+  T=4 in two. Every gap is at or below the seed spread of its own cell. The learned velocity
+  is therefore close to constant along the path: 4 Euler steps already resolve the map, and
+  discretisation error is not what limits accuracy.
+- **T matters a great deal for rolled-out FM, and fewer steps are better.** On Aircraft
+  K = full, T=4 scores 0.3299 against 0.2952 for T=12 - a 0.035 gap, roughly 9x the seed std
+  of either cell. The same direction gives +0.012 on Aircraft K = 10 and +0.009 on DTD
+  K = full. Where rolled-out training is behind (K = 5, and DTD K = 10) the two step counts
+  are level, within 0.003.
+- **Rolled-out training needs data.** Against the better of the two standard cells it is
+  *behind* at K = 5 on both datasets (-0.0101 on DTD, -0.0066 on Aircraft) and pulls ahead
+  only with more examples: +0.0151 on DTD at K = full, and on Aircraft +0.0128 already at
+  K = 10 rising to **+0.0822** at K = full. The endpoint objective has more freedom in how it
   reaches the prototype, and with 5 shots per class that freedom is spent on the training set.
-- **Spread shrinks with K**, as in Stage 1: DTD std falls from ~0.009 at K = 5 to ~0.003 at
-  K = full.
+- **Spread shrinks with K on DTD**, as in Stage 1: the per-cell std falls from 0.0070 - 0.0121
+  at K = 5 to 0.0009 - 0.0033 at K = full. On Aircraft there is no such trend (0.0018 - 0.0044
+  at K = 5, 0.0014 - 0.0038 at K = full); its seeds were already consistent.
 - Aircraft remains much harder than DTD, and the ordering of the two datasets is unchanged
   from Stage 1: 100 fine-grained variants whose text prompts are close together give the flow
   a much weaker target geometry than 47 texture names.
@@ -225,9 +232,9 @@ standard FM minimises a velocity MSE against `p_y - z_i`, rolled-out FM an endpo
 against `p_y`. They are different quantities and overlaying them would be meaningless.
 
 Both are reported as per-element means over 1024 dimensions, so multiplying by 1024 turns
-them into squared distances: the DTD rolled-out field at T = 4, seed 0 ends at 4.0e-5, i.e.
-`||z_T - p_y||^2` = 0.041, an RMS distance of 0.20 from the prototype in a space where every
-vector has unit norm.
+them into squared distances: the DTD rolled-out field at T = 4, seed 0 ends at 1.1e-5, i.e.
+`||z_T - p_y||^2` = 0.011, an RMS distance of 0.11 from the prototype in a space where every
+vector has unit norm. The Aircraft equivalent is 2.9e-5, an RMS distance of 0.17.
 
 **DTD**
 
@@ -237,27 +244,54 @@ vector has unit norm.
 
 ![Aircraft training curves](figures/flow_training_curves_aircraft.png)
 
-- Training is stable for both objectives at lr 1e-3: the loss falls smoothly over all 300
-  epochs with no oscillation or divergence, and backpropagating through 12 sequential Euler
-  steps did not need gradient clipping or a smaller learning rate.
-- **The deeper rollout optimises worse.** In 17 of the 18 rolled-out pairs the T=12 field
-  ends at a *higher* endpoint loss than its T=4 twin, and the eighteenth is a tie at the
-  printed precision - it is never lower (DTD K = full: 4.6e-5 - 5.0e-5 vs 3.9e-5 - 4.0e-5;
-  Aircraft K = full: 1.02e-4 - 1.06e-4 vs 8.8e-5 - 9.1e-5). Twelve chained network calls are
-  simply a harder optimisation problem than four, and on Aircraft that shows up directly in
-  test accuracy.
-- Loss falls with K for both objectives, as expected: more examples per class make the
-  displacement field easier to fit, not harder.
+- **These runs are converged.** The cosine schedule flattens both losses well before the end:
+  the final 100 epochs reduce the training loss by only 1% on average, and the best-validation
+  checkpoint lands on the last evaluated epoch in just 2 of the 54 runs. Mean validation
+  accuracy moves by -0.0003 over the last 100 epochs, i.e. it drifts rather than climbs.
+- Training is stable for both objectives: no oscillation or divergence, and backpropagating
+  through 12 sequential Euler steps needed neither gradient clipping nor a smaller peak
+  learning rate.
+- **The deeper rollout optimises worse.** In **all 18** rolled-out pairs the T=12 field ends
+  at a higher endpoint loss than its T=4 twin (DTD K = full: 1.2 - 1.3e-5 vs 1.0 - 1.1e-5;
+  Aircraft K = full: 4.3 - 4.9e-5 vs 2.8 - 2.9e-5). Twelve chained network calls are simply a
+  harder optimisation problem than four, and on Aircraft that shows up directly in test
+  accuracy.
+- Loss falls with K for every objective and step count, monotonically in all six series:
+  more examples per class make the displacement field easier to fit, not harder.
+
+### Why this run is longer than the first one
+
+The first pass used 300 epochs at a constant lr 1e-3. Its curves were still descending
+log-linearly at the last epoch, and the diagnosis confirmed it: of the six validation scores
+printed per run, the highest was the final one in 34 of 55 fields, and validation accuracy
+gained +0.0058 on average over the last 50 epochs. Those fields were under-trained, not
+overfitted. Extending to 1000 epochs with a cosine-annealed learning rate changed the
+conclusions materially on one dataset and barely at all on the other:
+
+| Cell | 300 epochs, constant lr | 1000 epochs, cosine | Change |
+| --- | --- | --- | --- |
+| Aircraft, rolled-out, T = 4, K = full | 0.2845 | **0.3299** | +0.0454 |
+| Aircraft, rolled-out, T = 12, K = full | 0.2542 | 0.2952 | +0.0410 |
+| Aircraft, standard, T = 12, K = full | 0.2347 | 0.2477 | +0.0130 |
+| DTD, rolled-out, T = 4, K = full | 0.6651 | **0.6668** | +0.0017 |
+| DTD, standard, T = 12, K = full | 0.6493 | 0.6518 | +0.0025 |
+
+DTD was already close to converged at 300 epochs; Aircraft was not, and the rolled-out
+objective was the biggest beneficiary. This is worth stating plainly, because the headline
+Aircraft conclusion - that rolled-out FM at T = 4 separates decisively from everything else -
+only becomes visible once the fields are trained to convergence.
 
 ---
 
 ## 5. Feature Space Before and After the Layer
 
 Original features, after standard FM and after rolled-out FM, for 8 fixed classes with
-T = 12, K = full, seed 0. The PCA is fitted **once** over all three feature sets and the
-prototypes together and then applied to each, so the three panels share one coordinate
-system and the movement between them is real rather than a re-projection. Stars are the text
-prototypes.
+T = 12, K = full, seed 0. Stars are the text prototypes.
+
+One PCA basis is shared by all three panels, so the movement between them is real rather than
+a re-projection. The basis is fitted on the **original features and the prototypes only**,
+which is exactly the Stage 1 embedding basis - so the left panel reproduces the CLIP RN50
+panel of `stage1.md` and the other two show where the layer moved that same cloud.
 
 **DTD**
 
@@ -267,20 +301,26 @@ prototypes.
 
 ![Aircraft feature comparison](figures/flow_feature_comparison_aircraft.png)
 
-- The left panel is the Stage 1 picture: the image cloud and the text prototypes sit in two
-  separate regions, the CLIP modality gap described in `stage1.md`. The layer's job is
-  precisely to cross that gap, and the training loss says it does - the rolled-out fields
-  drawn here (T = 12, K = full) land their training features at an RMS distance of ~0.22
-  (DTD) and ~0.33 (Aircraft) from the target prototype, in a space where every vector has
-  unit norm.
-- What to read off the two transported panels is whether the per-class groups stay
-  *separated* while they concentrate. Concentration alone is not enough: the classifier is a
-  cosine 1-NN against the prototypes, so a field that drove every embedding onto the
-  prototype barycentre would score worse than the baseline. The accuracy table shows this did
-  not happen.
+- The left panel is the Stage 1 picture: the image cloud and the text prototypes sit in
+  separate regions, the CLIP modality gap described in `stage1.md`. It is especially stark on
+  Aircraft, where the eight prototypes sit far below the entire image cloud.
+- Both transported panels land the cloud **on** the prototype constellation - the gap is
+  crossed. The training loss agrees: at K = full the rolled-out fields end at an RMS distance
+  of 0.11 (DTD) and 0.17 (Aircraft) from the target prototype, in a space where every vector
+  has unit norm.
+- What matters is that the per-class groups stay *separated* while they concentrate.
+  Concentration alone is not enough: the classifier is a cosine 1-NN against the prototypes,
+  so a field that drove every embedding onto the prototype barycentre would score worse than
+  the baseline. On DTD the paisley points remain grouped near their own star at one end of the
+  transported blob and freckled at the other; on Aircraft the DHC-6 and Cessna 208 points stay
+  separated from the jet cluster. The accuracy table is the quantitative version of the same
+  statement.
+- The rolled-out panel is visibly more spread along the prototype axis than the standard one,
+  which is what its objective allows: `L_roll` constrains only where the path ends, not how it
+  gets there, whereas standard FM is regressed onto the straight path at every t.
 - Aircraft is the harder case to inspect: 100 prototypes packed into a narrow cone, so
   neighbouring variants can land in the same region even when the endpoint distance is small.
-  That is consistent with Aircraft gaining 13 points where DTD gains 26.
+  That is consistent with Aircraft reaching 0.33 where DTD reaches 0.67.
 
 ---
 
@@ -304,7 +344,7 @@ class prototype; 4 classes x 2 examples.
 
 - The standard-FM paths should be close to straight and close to evenly spaced, because the
   field is regressed onto the constant velocity `p_y - z_i` of a straight path. The
-  T=4 vs T=12 agreement in the accuracy table (<= 0.0034 everywhere) is the quantitative
+  T=4 vs T=12 agreement in the accuracy table (<= 0.0045 everywhere) is the quantitative
   version of the same statement.
 - Rolled-out FM is under no such constraint: nothing in `L_roll` says the intermediate states
   have to lie on the segment, only that `z_T` lands on the prototype. Its paths are free to
@@ -317,7 +357,7 @@ class prototype; 4 classes x 2 examples.
 
 ## 7. Diagnostic: Accuracy Along t
 
-Not a deliverable - the brief scores the endpoint `z_T` - but it is the figure that explains
+The figure that explains
 whether the flow overshoots. Finely integrated (51 report times, 50 sub-steps per unit time),
 standard FM on DTD, K = full, seed 0.
 
@@ -326,14 +366,18 @@ standard FM on DTD, K = full, seed 0.
 - The curve starts **exactly** on the zero-shot baseline. This is enforced, not observed: the
   output layer is zero-initialised, and the run asserts
   `|acc(t=0) - 0.4005| < 5e-3` before the figure is drawn.
-- The same field scored at the brief's endpoint gives 0.6463 for both T = 4 and T = 12.
-- The peak of the curve is annotated on the figure. Any gap between that peak and the
-  endpoint is the amount left on the table by integrating all the way to t=1; the brief does
-  not allow stopping early, so it is reported here as diagnosis rather than as a result.
+- Accuracy climbs steeply to about t = 0.4 and then flattens. The annotated peak is 0.662 at
+  t = 0.76.
+- The same field gives 0.6484 at T = 4 and 0.6516 at T = 12,
+  so integrating all the way to t=1 costs roughly 1.0 - 1.4 points against stopping at the
+  peak.
+- This curve uses 50 sub-steps per unit time, far finer than T = 4 or T = 12, so its t=1 value
+  is a third discretisation of the same map and is not expected to equal either scored
+  endpoint exactly.
 
 ---
 
-## 8. Optional: Reverse Flow, Rendered by Retrieval
+## 8. Reverse Flow, Rendered by Retrieval
 
 Flow matching is time-symmetric, so the same field run from t=1 down to t=0 carries each
 class *text* prototype back into image-embedding space. Each intermediate point is rendered
@@ -357,56 +401,29 @@ classifier without touching the encoder or the prototypes:
 | Setting | DTD | Aircraft |
 | --- | --- | --- |
 | Zero-shot CLIP (Stage 1) | 0.4005 | 0.1545 |
-| Best FM layer, K = 5 | 0.5252 | 0.1712 |
-| Best FM layer, K = full | **0.6651** | **0.2845** |
+| Best FM layer, K = 5 | 0.5335 | 0.1741 |
+| Best FM layer, K = full | **0.6668** | **0.3299** |
 | Linear probe, ResNet-18, K = full (Stage 1) | 0.6284 | 0.3662 |
 | Linear probe, DINOv2, K = full (Stage 1) | 0.7637 | - |
 
 On DTD the layer overtakes the ResNet-18 probe trained on the same full split, while still
-classifying by cosine against frozen text prototypes. On Aircraft it does not: 0.2845 against
-0.3662. The layer can only move embeddings towards a fixed target geometry it does not
-control, and on 100 fine-grained variants that geometry is the bottleneck - the prototypes
-themselves are too close together. A probe, by contrast, is free to place its own decision
-boundaries.
+classifying by cosine against frozen text prototypes. On Aircraft it does not, but the gap is
+now small: 0.3299 against 0.3662. The layer can only move embeddings towards a fixed target
+geometry it does not control, and on 100 fine-grained variants that geometry is the
+bottleneck - the prototypes themselves are close together. A probe, by contrast, is free to
+place its own decision boundaries.
 
 **Which objective to prefer.** Rolled-out FM at T = 4, if there is enough data. It is the
 best cell in both tables at K = full and is the only variant that clearly separates from the
-others (+0.05 on Aircraft). At K = 5 the two objectives are indistinguishable, and standard
-FM is cheaper: one training per (dataset, K, seed) instead of one per T, and one network call
+others, by +0.08 on Aircraft. At K = 5 the ordering reverses and standard FM is both better
+and cheaper: one training per (dataset, K, seed) instead of one per T, and one network call
 per step instead of T chained calls with a retained graph.
 
 **Why fewer Euler steps win for the rolled-out objective.** Two effects point the same way.
 The T=12 rollout is a 12-deep chain of the same network, which optimises measurably worse -
-its final endpoint loss is at least as high as T=4's in all 18 pairs, and strictly higher in
-17. And with 4 steps the map from `z_i` to `z_T` is a coarser, more constrained function,
-which is a form of regularisation on a layer that has 1.31 M parameters and, at K = full on
-DTD, only 1880 training examples.
-
-**Caveats.**
-- The field is far larger than the Stage 1 probe it is compared against (1.31 M parameters
-  vs 48 k for a CLIP linear probe), yet at K = 5 it improves only on the *zero-shot*
-  baseline, not on any probe. The comparison that matters is FM vs zero-shot, which is the
-  one the brief asks for.
-- K = full seeds vary only initialisation and batch order, since the subset is the whole
-  split - so those error bars measure optimisation noise, not sampling noise.
-- Everything is a single encoder and a single prompt template, inherited from Stage 1.
-
----
-
-## Deliverable Checklist
-
-| Brief item | Where |
-| --- | --- |
-| Standard FM loss, `z_t` and `u_i` per spec | Section 1, `models/flow_matching_clip.py` |
-| Euler inference `z_{k+1} = z_k + (1/T) v(z_k, k/T)`, T in {4, 12} | Section 1, `models/flow_ode.rollout` |
-| Rolled-out training, same T at train and test | Section 1, `train/train_flow_clip.batch_loss` |
-| Small MLP, 2 x 512, SiLU, scalar t concatenated | Config table, `models/flow_matching_clip.VelocityField` |
-| K in {5, 10, full}, Stage 1 subsets and seeds | Section 2 |
-| Accuracy table + acc-vs-K plot with error bars and dAcc | Sections 2 and 3 |
-| Training-loss curves | Section 4 |
-| 3-way feature visualisation, joint projection | Section 5 |
-| Flow trajectories for individual examples | Section 6 |
-| Optional: reverse flow from prototypes | Section 8 |
+its final endpoint loss is higher than T=4's in all 18 pairs. And with 4 steps the map from
+`z_i` to `z_T` is a coarser, more constrained function, which is a form of regularisation on
+a layer that has 1.31 M parameters and, at K = full on DTD, only 1880 training examples.
 
 ---
 
