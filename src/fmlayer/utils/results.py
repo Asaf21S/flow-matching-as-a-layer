@@ -12,6 +12,7 @@ RUNS_COLUMNS = (
     "encoder",
     "k",
     "seed",
+    "steps",
     "t",
     "split",
     "accuracy",
@@ -19,8 +20,9 @@ RUNS_COLUMNS = (
     "timestamp",
 )
 # A run is uniquely identified by these fields; re-running replaces the old row.
-# ``t`` is the flow-matching integration time; methods without one record NO_VALUE.
-IDENTITY_COLUMNS = ("method", "dataset", "encoder", "k", "seed", "t", "split")
+# ``steps`` is the number of Euler steps T, ``t`` the flow-matching integration time;
+# methods without either record NO_VALUE.
+IDENTITY_COLUMNS = ("method", "dataset", "encoder", "k", "seed", "steps", "t", "split")
 NO_VALUE = "none"
 
 

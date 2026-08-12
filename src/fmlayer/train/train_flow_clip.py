@@ -6,13 +6,14 @@ import torch
 from torch import Tensor, nn
 from tqdm.auto import tqdm
 
+from src.fmlayer.data.fewshot import K_VALUES, SEEDS, load_train_subset
 from src.fmlayer.data.specs import DATASET_SPECS, get_spec
 from src.fmlayer.encoders.base import default_device
 from src.fmlayer.encoders.clip_rn50 import ClipRN50Encoder
 from src.fmlayer.features.cache import load_split
 from src.fmlayer.models.flow_matching_clip import (
-    ClipFlowWrapper,
     TEMPERATURE,
+    ClipFlowWrapper,
     build_path,
     build_velocity_field,
     cosine_logits,
@@ -21,9 +22,9 @@ from src.fmlayer.models.flow_matching_clip import (
     sample_paths,
 )
 from src.fmlayer.models.flow_ode import (
-    DEFAULT_METHOD,
-    DEFAULT_STEPS,
     make_time_grid,
+    rollout,
+    rollout_predictions,
     trajectory_accuracies,
     trajectory_predictions,
 )
@@ -32,36 +33,35 @@ from src.fmlayer.train.evaluate import top1_accuracy
 from src.fmlayer.utils.results import default_results_root, record_run
 from src.fmlayer.utils.seeding import set_seed
 
-METHOD = "fm_clip"
+STANDARD = "standard"
+ROLLED = "rolled"
+METHODS = {STANDARD: "fm_clip_standard", ROLLED: "fm_clip_rolled"}
+
 ENCODER = ClipRN50Encoder.NAME
-SEEDS = (0, 1, 2)
+# The brief evaluates T in {4, 12}.
+STEP_COUNTS = (4, 12)
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-4
 BATCH_SIZE = 256
 MAX_EPOCHS = 300
 EVAL_EVERY = 10
 PRINT_EVERY = 50
-# Weight of the endpoint cross-entropy added to the flow-matching regression. Pure CFM
-# regresses onto a barycentre of prototypes, which is the worst possible place for a cosine
-# 1-NN; this term makes the layer optimise the metric it is scored on.
-CE_WEIGHT = 1.0
-# Gaussian smoothing of the t=1 target, so it is a cloud rather than one of C atoms.
-TARGET_NOISE = 0.1
-# Keep the integration on the unit sphere, where the cosine classifier lives.
-RENORMALIZE = True
-# 51 points puts a grid time on every 0.02; every 5th one is recorded in runs.csv.
+
+# Extensions, off by default. The brief's objective is the bare velocity regression.
+CE_WEIGHT = 0.0
+TARGET_NOISE = 0.0
+
+# Diagnostic accuracy-versus-t sweep; not a deliverable, so it is opt-in.
 CURVE_POINTS = 51
 RECORD_STRIDE = 5
-# Validation sweeps the same 11 times that get recorded, so the selected t is on the grid.
-VAL_POINTS = 11
-SOLVER_STEPS = (10, 50, 200)
-# The t=0 endpoint is the untouched embedding, so it must land on the zero-shot number.
+CURVE_STEPS = 50
+
+# The t=0 endpoint is the untouched feature, so it must land on the zero-shot number.
 # The slack only absorbs float32/TF32 tie-breaking between the torch and numpy matmuls.
 ZEROSHOT_TOLERANCE = 5e-3
 CURVES_DIRNAME = "flow_curves"
 CHECKPOINT_DIRNAME = "flow_ckpt"
 TEST_SPLIT = "test"
-K_LABEL = "full"
 
 
 def load_clip_features(
@@ -81,8 +81,36 @@ def load_clip_features(
     return l2_normalize(features).astype(np.float32), labels
 
 
+def load_clip_subset(
+    dataset: str,
+    k: int | str,
+    seed: int,
+    feature_root: Path | None = None,
+    subset_root: Path | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load one Stage 1 K-shot training subset, L2-normalised.
+
+    Reuses the persisted Stage 1 indices so the FM layer trains on exactly the images the
+    baseline protocol drew.
+
+    Args:
+        dataset: Dataset key.
+        k: Shots per class, or ``"full"``.
+        seed: Subset seed, ignored when ``k`` is ``"full"``.
+        feature_root: Feature cache directory; defaults to the resolved feature root.
+        subset_root: Subset index directory; defaults to the resolved subset root.
+
+    Returns:
+        Unit-norm subset features and their integer labels.
+    """
+    features, labels, _ = load_train_subset(
+        ENCODER, dataset, k, seed, feature_root, subset_root
+    )
+    return l2_normalize(features).astype(np.float32), labels
+
+
 def load_text_prototypes(dataset: str, feature_root: Path | None = None) -> np.ndarray:
-    """Load the frozen CLIP text prototypes that the flow transports embeddings towards.
+    """Load the frozen CLIP text prototypes the flow transports features towards.
 
     Args:
         dataset: Dataset key.
@@ -100,33 +128,103 @@ def load_text_prototypes(dataset: str, feature_root: Path | None = None) -> np.n
     return l2_normalize(prototypes).astype(np.float32)
 
 
-def constant_shift_accuracy(
-    train_features: np.ndarray,
-    train_labels: np.ndarray,
-    prototypes: np.ndarray,
-    test_features: np.ndarray,
-    test_labels: np.ndarray,
+def zeroshot_accuracy(
+    dataset: str, feature_root: Path | None = None
 ) -> float:
-    """Score the trivial ablation of translating every embedding by one shared vector.
-
-    The mean training displacement is essentially the CLIP modality gap. Note this is *not*
-    a no-op for the classifier: with unit-norm prototypes the shifted score is
-    ``(z + m) . t_c = z . t_c + m . t_c``, and the bias ``m . t_c`` differs per class, so a
-    shared translation reorders the similarities and typically hurts. It is a lower bound
-    the flow must clear, not a neutral reference.
+    """Score the Stage 1 prototype baseline the FM layer is compared against.
 
     Args:
-        train_features: Unit-norm training image embeddings.
-        train_labels: Labels of the training images.
-        prototypes: Unit-norm text prototypes.
-        test_features: Unit-norm test image embeddings.
-        test_labels: Labels of the test images.
+        dataset: Dataset key.
+        feature_root: Feature cache directory; defaults to the resolved feature root.
 
     Returns:
-        Top-1 accuracy of the shifted test embeddings.
+        Top-1 accuracy of the untouched features under the cosine rule.
     """
-    shift = (prototypes[train_labels] - train_features).mean(axis=0)
-    return top1_accuracy(classify(test_features + shift, prototypes), test_labels)
+    features, labels = load_clip_features(dataset, TEST_SPLIT, feature_root)
+    prototypes = load_text_prototypes(dataset, feature_root)
+    return top1_accuracy(classify(features, prototypes), labels)
+
+
+def batch_loss(
+    model: ClipFlowWrapper,
+    path,
+    source: Tensor,
+    target: Tensor,
+    labels: Tensor,
+    prototypes: Tensor,
+    generator: torch.Generator,
+    objective: str,
+    steps: int,
+    ce_weight: float,
+    temperature: float,
+    target_noise: float,
+) -> tuple[Tensor, float]:
+    """Compute one training batch loss for either objective.
+
+    Standard training regresses the velocity at a random point on the ideal path. Rolled-out
+    training runs the same T-step Euler sequence used at inference and supervises only how
+    close the final state lands to the prototype, backpropagating through all T predictions.
+
+    Args:
+        model: The wrapped velocity field.
+        path: Probability path supplying ``z_t`` and ``u_i``; unused when rolled out.
+        source: Features of shape ``(batch, embed_dim)``.
+        target: Prototype of each feature's class, same shape.
+        labels: Integer labels, for the cross-entropy extension.
+        prototypes: All class prototypes, for the cross-entropy extension.
+        generator: CPU generator making time and noise sampling reproducible.
+        objective: ``"standard"`` or ``"rolled"``.
+        steps: Euler steps ``T``, used by the rolled-out objective.
+        ce_weight: Weight of the endpoint cross-entropy extension; 0 follows the brief.
+        temperature: Softmax temperature of that extension.
+        target_noise: Gaussian smoothing of the target, an extension; 0 follows the brief.
+
+    Returns:
+        The differentiable loss and the auxiliary cross-entropy value for logging.
+    """
+    if objective == ROLLED:
+        final, _ = rollout(model, source, steps)
+        return nn.functional.mse_loss(final, target), 0.0
+
+    sample = sample_paths(path, source, target, generator, target_noise)
+    velocity = model(x=sample.x_t, t=sample.t)
+    loss = nn.functional.mse_loss(velocity, sample.dx_t)
+
+    if ce_weight <= 0.0:
+        return loss, 0.0
+
+    endpoint = predicted_endpoint(sample.x_t, sample.t, velocity)
+    class_loss = nn.functional.cross_entropy(
+        cosine_logits(endpoint, prototypes, temperature), labels
+    )
+    return loss + ce_weight * class_loss, float(class_loss)
+
+
+def validation_accuracies(
+    model: ClipFlowWrapper,
+    val_features: Tensor,
+    val_labels: np.ndarray,
+    prototypes: Tensor,
+    step_counts: tuple[int, ...],
+) -> dict:
+    """Score the rollout endpoint on the validation split at each step count.
+
+    Args:
+        model: The wrapped velocity field.
+        val_features: Validation features.
+        val_labels: Validation labels.
+        prototypes: Class prototypes.
+        step_counts: Euler step counts to evaluate.
+
+    Returns:
+        Top-1 accuracy keyed by step count.
+    """
+    return {
+        steps: top1_accuracy(
+            rollout_predictions(model, val_features, prototypes, steps), val_labels
+        )
+        for steps in step_counts
+    }
 
 
 def train_flow(
@@ -138,193 +236,186 @@ def train_flow(
     prototypes: Tensor,
     seed: int,
     device: torch.device,
+    objective: str = STANDARD,
+    step_counts: tuple[int, ...] = STEP_COUNTS,
     max_epochs: int = MAX_EPOCHS,
     batch_size: int = BATCH_SIZE,
     learning_rate: float = LEARNING_RATE,
     weight_decay: float = WEIGHT_DECAY,
     eval_every: int = EVAL_EVERY,
-    val_steps: int = DEFAULT_STEPS,
-    val_points: int = VAL_POINTS,
     ce_weight: float = CE_WEIGHT,
     temperature: float = TEMPERATURE,
     target_noise: float = TARGET_NOISE,
-    renormalize: bool = RENORMALIZE,
     verbose: bool = True,
     progress_desc: str | None = None,
-) -> tuple[ClipFlowWrapper, list[dict], int, float]:
-    """Fit the velocity field, selecting both the epoch and the stopping time on validation.
+) -> tuple[ClipFlowWrapper, list[dict], int]:
+    """Fit the velocity field and keep the checkpoint with the best validation accuracy.
 
-    The loss is the flow-matching regression plus, optionally, a cross-entropy on the
-    single-step estimate of the t=1 endpoint. Validation sweeps the whole time grid rather
-    than only t=1, because the transport is most useful before it contracts the cloud.
+    Selection uses the mean rollout accuracy over ``step_counts``. For rolled-out training
+    that tuple holds a single T, so the criterion is that T; for standard training it averages
+    the step counts the field will be evaluated at, which keeps the choice fair to both.
 
     Args:
-        source: Unit-norm training image embeddings, the t=0 end of each path.
-        target: Text embedding of each training image's label, the t=1 end.
-        source_labels: Labels of the training images, for the endpoint cross-entropy.
-        val_features: Unit-norm validation image embeddings.
+        source: Unit-norm training features, the t=0 end of each path.
+        target: Prototype of each training feature's class, the t=1 end.
+        source_labels: Labels of the training features.
+        val_features: Unit-norm validation features.
         val_labels: Labels of the validation split.
-        prototypes: Unit-norm text prototypes used for the validation 1-NN.
+        prototypes: Unit-norm class prototypes.
         seed: Seed controlling initialisation, batch order and time sampling.
         device: Device to train on.
+        objective: ``"standard"`` or ``"rolled"``.
+        step_counts: Euler step counts used for validation, and for the rollout when rolled.
         max_epochs: Number of epochs.
         batch_size: Examples per optimisation step.
         learning_rate: AdamW learning rate.
         weight_decay: AdamW weight decay.
         eval_every: Epochs between validation sweeps.
-        val_steps: Euler sub-steps used when integrating the validation split.
-        val_points: Number of times the validation sweep evaluates.
-        ce_weight: Weight of the endpoint cross-entropy; 0 gives pure flow matching.
-        temperature: Softmax temperature of the endpoint cross-entropy.
-        target_noise: Gaussian smoothing of the t=1 target.
-        renormalize: Keep the validation integration on the unit sphere.
-        verbose: Print per-epoch losses and validation accuracy.
+        ce_weight: Weight of the endpoint cross-entropy extension; 0 follows the brief.
+        temperature: Softmax temperature of that extension.
+        target_noise: Gaussian smoothing of the target, an extension; 0 follows the brief.
+        verbose: Print periodic losses and validation accuracy.
         progress_desc: Label of this run's own tqdm bar; ``None`` disables it.
 
     Returns:
-        The field at its best checkpoint, the history, the best epoch and the time that
-        maximised validation accuracy.
+        The field at its best checkpoint, the per-epoch history and the best epoch.
     """
+    if objective not in (STANDARD, ROLLED):
+        raise ValueError(f"objective must be {STANDARD!r} or {ROLLED!r}, got {objective!r}")
+
     model = build_velocity_field(source.shape[1], seed, device)
     path = build_path()
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    val_grid = make_time_grid(val_points, device=device)
-    criterion = nn.CrossEntropyLoss()
+    train_steps = step_counts[0] if objective == ROLLED else 0
 
     history = []
     best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
     best_accuracy = -1.0
     best_epoch = 0
-    best_time = 1.0
     num_train = len(source)
 
-    epochs = tqdm(range(1, max_epochs + 1), desc=progress_desc, leave=False) if progress_desc else range(1, max_epochs + 1)
+    epochs = range(1, max_epochs + 1)
+    if progress_desc:
+        epochs = tqdm(epochs, desc=progress_desc, leave=False)
+
     for epoch in epochs:
         model.train()
         order = torch.randperm(num_train, generator=generator).to(device)
-        flow_total = 0.0
+        loss_total = 0.0
         class_total = 0.0
 
         for start in range(0, num_train, batch_size):
             batch = order[start : start + batch_size]
             optimizer.zero_grad(set_to_none=True)
 
-            sample = sample_paths(
-                path, source[batch], target[batch], generator, target_noise
+            loss, class_value = batch_loss(
+                model,
+                path,
+                source[batch],
+                target[batch],
+                source_labels[batch],
+                prototypes,
+                generator,
+                objective,
+                train_steps,
+                ce_weight,
+                temperature,
+                target_noise,
             )
-            velocity = model(x=sample.x_t, t=sample.t)
-            flow_loss = nn.functional.mse_loss(velocity, sample.dx_t)
-            loss = flow_loss
-
-            class_loss = torch.zeros((), device=device)
-            if ce_weight > 0.0:
-                endpoint = predicted_endpoint(sample.x_t, sample.t, velocity)
-                class_loss = criterion(
-                    cosine_logits(endpoint, prototypes, temperature), source_labels[batch]
-                )
-                loss = loss + ce_weight * class_loss
-
             loss.backward()
             optimizer.step()
-            flow_total += flow_loss.item() * len(batch)
-            class_total += float(class_loss) * len(batch)
+
+            loss_total += loss.item() * len(batch)
+            class_total += class_value * len(batch)
 
         entry = {
             "epoch": epoch,
-            "flow_loss": flow_total / num_train,
+            "train_loss": loss_total / num_train,
             "class_loss": class_total / num_train,
         }
 
         if epoch % eval_every == 0 or epoch == max_epochs:
             model.eval()
-            accuracies = trajectory_accuracies(
-                trajectory_predictions(
-                    model,
-                    val_features,
-                    prototypes,
-                    val_grid,
-                    steps=val_steps,
-                    renormalize=renormalize,
-                ),
-                val_labels,
+            accuracies = validation_accuracies(
+                model, val_features, val_labels, prototypes, step_counts
             )
-            index = int(np.argmax(accuracies))
-            entry["val_accuracy"] = accuracies[index]
-            entry["val_time"] = float(val_grid[index])
-            entry["val_accuracy_t1"] = accuracies[-1]
+            mean_accuracy = float(np.mean(list(accuracies.values())))
+            entry["val_accuracy"] = mean_accuracy
+            entry["val_by_steps"] = {str(key): value for key, value in accuracies.items()}
 
             if verbose and (epoch % PRINT_EVERY == 0 or epoch == max_epochs):
-                print(
-                    f"  epoch {epoch:3d}  flow {entry['flow_loss']:.4f}  "
-                    f"ce {entry['class_loss']:.4f}  "
-                    f"val {accuracies[index]:.4f}@t={entry['val_time']:.1f}  "
-                    f"(t=1 {accuracies[-1]:.4f})"
-                )
+                detail = "  ".join(f"T={key} {value:.4f}" for key, value in accuracies.items())
+                print(f"  epoch {epoch:3d}  loss {entry['train_loss']:.6f}  {detail}")
 
-            if accuracies[index] > best_accuracy:
-                best_accuracy = accuracies[index]
+            if mean_accuracy > best_accuracy:
+                best_accuracy = mean_accuracy
                 best_epoch = epoch
-                best_time = entry["val_time"]
                 best_state = {
                     key: value.detach().clone()
                     for key, value in model.state_dict().items()
                 }
         elif verbose and epoch % PRINT_EVERY == 0:
-            print(
-                f"  epoch {epoch:3d}  flow {entry['flow_loss']:.4f}  "
-                f"ce {entry['class_loss']:.4f}"
-            )
+            print(f"  epoch {epoch:3d}  loss {entry['train_loss']:.6f}")
 
         history.append(entry)
 
     model.load_state_dict(best_state)
-    return model, history, best_epoch, best_time
+    return model, history, best_epoch
 
 
-def curves_path(dataset: str, seed: int, results_root: Path | None = None) -> Path:
-    """Build the path of a saved accuracy-versus-t curve.
+def run_tag(objective: str, dataset: str, k: int | str, seed: int, steps: int | str) -> str:
+    """Build the filename stem identifying one trained field."""
+    return f"{METHODS[objective]}_{dataset}_k{k}_seed{seed}_T{steps}"
+
+
+def curves_path(tag: str, results_root: Path | None = None) -> Path:
+    """Build the path of a saved run record.
 
     Args:
-        dataset: Dataset key.
-        seed: Run seed.
+        tag: Stem from :func:`run_tag`.
         results_root: Results directory; defaults to the resolved results root.
 
     Returns:
-        Path of the JSON curve file.
+        Path of the JSON record.
     """
     root = Path(results_root) if results_root is not None else default_results_root()
-    return root / CURVES_DIRNAME / f"{METHOD}_{dataset}_seed{seed}.json"
+    return root / CURVES_DIRNAME / f"{tag}.json"
 
 
-def checkpoint_path(dataset: str, seed: int, results_root: Path | None = None) -> Path:
+def checkpoint_path(tag: str, results_root: Path | None = None) -> Path:
     """Build the path of a saved velocity field.
 
     Args:
-        dataset: Dataset key.
-        seed: Run seed.
+        tag: Stem from :func:`run_tag`.
         results_root: Results directory; defaults to the resolved results root.
 
     Returns:
         Path of the ``.pt`` checkpoint.
     """
     root = Path(results_root) if results_root is not None else default_results_root()
-    return root / CHECKPOINT_DIRNAME / f"{METHOD}_{dataset}_seed{seed}.pt"
+    return root / CHECKPOINT_DIRNAME / f"{tag}.pt"
 
 
 def load_flow_checkpoint(
+    objective: str,
     dataset: str,
+    k: int | str = "full",
     seed: int = 0,
+    steps: int | str = "any",
     results_root: Path | None = None,
     device: torch.device | None = None,
 ) -> ClipFlowWrapper:
     """Rebuild a trained velocity field from disk, so the figures need no retraining.
 
     Args:
+        objective: ``"standard"`` or ``"rolled"``.
         dataset: Dataset key.
+        k: Shots per class the field was trained on.
         seed: Run seed.
+        steps: Euler steps baked into training; ``"any"`` for standard runs.
         results_root: Results directory; defaults to the resolved results root.
         device: Device to load onto; defaults to CUDA when available.
 
@@ -332,65 +423,109 @@ def load_flow_checkpoint(
         The field in eval mode, wrapped for the ODE solver.
     """
     device = device if device is not None else default_device()
-    path = checkpoint_path(dataset, seed, results_root)
+    path = checkpoint_path(run_tag(objective, dataset, k, seed, steps), results_root)
     if not path.is_file():
-        raise FileNotFoundError(f"No flow checkpoint at {path}. Run run_flow_clip() first.")
+        raise FileNotFoundError(f"No flow checkpoint at {path}. Train it first.")
 
     payload = torch.load(path, map_location=device, weights_only=False)
     config = payload["config"]
     model = build_velocity_field(
-        config["embed_dim"],
-        seed,
-        device,
-        config["hidden_dim"],
-        config["num_blocks"],
-        config["dropout"],
+        config["embed_dim"], seed, device, config["hidden_dim"], config["num_layers"]
     )
     model.load_state_dict(payload["state_dict"])
     model.eval()
     return model
 
 
+def diagnostic_curve(
+    model: ClipFlowWrapper,
+    test_features: Tensor,
+    test_labels: np.ndarray,
+    prototypes: Tensor,
+    points: int = CURVE_POINTS,
+    steps: int = CURVE_STEPS,
+) -> tuple[list[float], list[float]]:
+    """Sweep accuracy along the trajectory, finely, for diagnosis only.
+
+    Not a deliverable: the brief scores the endpoint after T steps. This sweep exists to
+    show whether accuracy peaks before t=1 and how far the flow overshoots.
+
+    Args:
+        model: The trained field.
+        test_features: Unit-norm test features.
+        test_labels: Test labels.
+        prototypes: Class prototypes.
+        points: Number of grid times.
+        steps: Sub-steps per unit of time for the fine integration.
+
+    Returns:
+        The grid times and the accuracy at each of them.
+    """
+    grid = make_time_grid(points)
+    accuracies = trajectory_accuracies(
+        trajectory_predictions(model, test_features, prototypes, grid, steps=steps),
+        test_labels,
+    )
+    return [round(float(value), 4) for value in grid], accuracies
+
+
 def run_flow_clip(
     dataset: str,
+    objective: str = STANDARD,
+    k: int | str = "full",
     seed: int = 0,
+    steps: int | None = None,
+    step_counts: tuple[int, ...] = STEP_COUNTS,
     feature_root: Path | None = None,
+    subset_root: Path | None = None,
     results_root: Path | None = None,
     device: torch.device | None = None,
     max_epochs: int = MAX_EPOCHS,
-    solver_steps: tuple[int, ...] = SOLVER_STEPS,
-    method: str = DEFAULT_METHOD,
     ce_weight: float = CE_WEIGHT,
     target_noise: float = TARGET_NOISE,
-    renormalize: bool = RENORMALIZE,
+    with_curve: bool = False,
     record: bool = True,
     verbose: bool = True,
 ) -> dict:
-    """Train the flow-matching layer on one dataset and sweep its accuracy over t.
+    """Train one FM layer and score the transported test features.
+
+    Standard training does not depend on T, so one field is evaluated at every entry of
+    ``step_counts``. Rolled-out training bakes T in, so ``steps`` must be given and the field
+    is scored at that T alone.
 
     Args:
         dataset: Dataset key, ``"dtd"`` or ``"aircraft"``.
-        seed: Run seed controlling initialisation and batch order.
+        objective: ``"standard"`` or ``"rolled"``.
+        k: Shots per class, or ``"full"``.
+        seed: Run seed; also selects the K-shot subset, as in Stage 1.
+        steps: Euler steps for rolled-out training; ignored when standard.
+        step_counts: Step counts a standard field is evaluated at.
         feature_root: Feature cache directory; defaults to the resolved feature root.
+        subset_root: Subset index directory; defaults to the resolved subset root.
         results_root: Results directory; defaults to the resolved results root.
         device: Device to train on; defaults to CUDA when available.
         max_epochs: Number of training epochs.
-        solver_steps: Euler sub-step counts the accuracy curve is recomputed with.
-        method: Solver method used for the curves.
-        ce_weight: Weight of the endpoint cross-entropy; 0 gives pure flow matching.
-        target_noise: Gaussian smoothing of the t=1 target.
-        renormalize: Keep the integration on the unit sphere.
-        record: Append the per-t accuracies to ``runs.csv``.
-        verbose: Print per-epoch loss and validation, plus a final summary.
+        ce_weight: Weight of the endpoint cross-entropy extension; 0 follows the brief.
+        target_noise: Gaussian smoothing of the target, an extension; 0 follows the brief.
+        with_curve: Also compute the diagnostic accuracy-versus-t sweep.
+        record: Append the results to ``runs.csv``.
+        verbose: Print progress and a summary line.
 
     Returns:
-        The t=0 and t=1 accuracies, the reference baselines, the dense curve per solver
-        setting, the training history and the artefact paths.
+        The baseline accuracy, the accuracy per evaluated T, the delta against the baseline,
+        the training history and the artefact paths.
     """
     device = device if device is not None else default_device()
     set_seed(seed)
 
-    train_features, train_labels = load_clip_features(dataset, "train", feature_root)
+    if objective == ROLLED and steps is None:
+        raise ValueError("Rolled-out training needs an explicit steps=T.")
+    evaluated = (steps,) if objective == ROLLED else tuple(step_counts)
+    tag = run_tag(objective, dataset, k, seed, steps if objective == ROLLED else "any")
+
+    train_features, train_labels = load_clip_subset(
+        dataset, k, seed, feature_root, subset_root
+    )
     val_features, val_labels = load_clip_features(dataset, "val", feature_root)
     test_features, test_labels = load_clip_features(dataset, TEST_SPLIT, feature_root)
     prototypes = load_text_prototypes(dataset, feature_root)
@@ -402,7 +537,7 @@ def run_flow_clip(
     test_x = torch.from_numpy(test_features).to(device)
     prototypes_x = torch.from_numpy(prototypes).to(device)
 
-    model, history, best_epoch, best_time = train_flow(
+    model, history, best_epoch = train_flow(
         source,
         target,
         source_labels,
@@ -411,127 +546,113 @@ def run_flow_clip(
         prototypes_x,
         seed,
         device,
+        objective,
+        evaluated,
         max_epochs,
-        val_steps=DEFAULT_STEPS,
         ce_weight=ce_weight,
         target_noise=target_noise,
-        renormalize=renormalize,
         verbose=verbose,
-        progress_desc=f"{dataset}/seed{seed}",
+        progress_desc=f"{METHODS[objective]} {dataset} k={k} seed={seed}",
     )
     model.eval()
 
-    time_grid = make_time_grid(CURVE_POINTS)
-    times = [round(float(value), 4) for value in time_grid]
-    curves = {
-        steps: trajectory_accuracies(
-            trajectory_predictions(
-                model,
-                test_x,
-                prototypes_x,
-                time_grid,
-                method,
-                steps,
-                renormalize=renormalize,
-            ),
-            test_labels,
+    baseline = top1_accuracy(classify(test_features, prototypes), test_labels)
+    accuracies = {
+        count: top1_accuracy(
+            rollout_predictions(model, test_x, prototypes_x, count), test_labels
         )
-        for steps in solver_steps
+        for count in evaluated
     }
-    reference = curves[DEFAULT_STEPS] if DEFAULT_STEPS in curves else curves[solver_steps[-1]]
+    deltas = {count: value - baseline for count, value in accuracies.items()}
 
-    zeroshot_accuracy = top1_accuracy(classify(test_features, prototypes), test_labels)
-    if abs(reference[0] - zeroshot_accuracy) > ZEROSHOT_TOLERANCE:
-        raise AssertionError(
-            f"{dataset}: t=0 accuracy {reference[0]:.6f} does not reproduce the zero-shot "
-            f"baseline {zeroshot_accuracy:.6f}. The features and the text prototypes are "
-            "misaligned, or the field is not the identity at t=0."
-        )
-    shift_accuracy = constant_shift_accuracy(
-        train_features, train_labels, prototypes, test_features, test_labels
-    )
-    best_val_accuracy = max(
-        entry["val_accuracy"] for entry in history if "val_accuracy" in entry
-    )
-    # The stopping time is chosen on validation, so the test number stays honest.
-    selected = min(range(len(times)), key=lambda index: abs(times[index] - best_time))
-    accuracy_at_best_time = reference[selected]
+    times, curve = ([], [])
+    if with_curve:
+        times, curve = diagnostic_curve(model, test_x, test_labels, prototypes_x)
+        if abs(curve[0] - baseline) > ZEROSHOT_TOLERANCE:
+            raise AssertionError(
+                f"{dataset}: t=0 accuracy {curve[0]:.6f} does not reproduce the prototype "
+                f"baseline {baseline:.6f}. Features and prototypes are misaligned, or the "
+                "field is not the identity at t=0."
+            )
 
     payload = {
-        "method": METHOD,
+        "method": METHODS[objective],
+        "objective": objective,
         "dataset": dataset,
         "encoder": ENCODER,
+        "k": k,
         "seed": seed,
+        "steps": steps if objective == ROLLED else None,
         "num_train": len(train_labels),
         "best_epoch": best_epoch,
-        "best_val_accuracy": best_val_accuracy,
-        "best_time": best_time,
-        "accuracy_at_best_time": accuracy_at_best_time,
+        "baseline_accuracy": baseline,
+        "accuracy_by_steps": {str(key): value for key, value in accuracies.items()},
+        "delta_by_steps": {str(key): value for key, value in deltas.items()},
         "ce_weight": ce_weight,
         "target_noise": target_noise,
-        "renormalize": renormalize,
-        "solver_method": method,
         "times": times,
-        "curves": {str(steps): values for steps, values in curves.items()},
-        "zeroshot_accuracy": zeroshot_accuracy,
-        "constant_shift_accuracy": shift_accuracy,
+        "curve": curve,
         "history": history,
     }
-    curve_file = curves_path(dataset, seed, results_root)
+    curve_file = curves_path(tag, results_root)
     curve_file.parent.mkdir(parents=True, exist_ok=True)
     curve_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    checkpoint_file = checkpoint_path(dataset, seed, results_root)
+    checkpoint_file = checkpoint_path(tag, results_root)
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "state_dict": model.state_dict(),
             "config": field_config(source.shape[1]),
+            "objective": objective,
             "dataset": dataset,
+            "k": k,
             "seed": seed,
+            "steps": steps,
         },
         checkpoint_file,
     )
 
     if record:
-        for index in range(0, len(times), RECORD_STRIDE):
+        for count, value in accuracies.items():
             record_run(
                 {
-                    "method": METHOD,
+                    "method": METHODS[objective],
                     "dataset": dataset,
                     "encoder": ENCODER,
-                    "k": K_LABEL,
+                    "k": k,
                     "seed": seed,
-                    "t": f"{times[index]:.2f}",
+                    "steps": count,
+                    "t": "1.00",
                     "split": TEST_SPLIT,
-                    "accuracy": reference[index],
+                    "accuracy": value,
                     "num_items": len(test_labels),
                 },
                 results_root,
             )
 
     if verbose:
+        scores = "  ".join(
+            f"T={count} {value:.4f} ({deltas[count]:+.4f})"
+            for count, value in accuracies.items()
+        )
         print(
-            f"    {dataset:<9} seed={seed}  train={len(train_labels):>5}  "
-            f"epoch {best_epoch:<4} "
-            f"t=0 {reference[0]:.4f} | best t={best_time:.1f} {accuracy_at_best_time:.4f} "
-            f"| t=1 {reference[-1]:.4f}  (shift {shift_accuracy:.4f})"
+            f"    {METHODS[objective]:<18} {dataset:<9} k={str(k):<4} seed={seed}  "
+            f"train={len(train_labels):>5}  base {baseline:.4f}  {scores}"
         )
 
     return {
         "dataset": dataset,
+        "objective": objective,
+        "k": k,
         "seed": seed,
-        "times": times,
-        "curves": curves,
-        "accuracy_t0": reference[0],
-        "accuracy_t1": reference[-1],
-        "best_time": best_time,
-        "accuracy_at_best_time": accuracy_at_best_time,
-        "zeroshot_accuracy": zeroshot_accuracy,
-        "constant_shift_accuracy": shift_accuracy,
+        "baseline_accuracy": baseline,
+        "accuracy_by_steps": accuracies,
+        "delta_by_steps": deltas,
         "best_epoch": best_epoch,
-        "best_val_accuracy": best_val_accuracy,
         "history": history,
+        "times": times,
+        "curve": curve,
         "curves_path": curve_file,
         "checkpoint_path": checkpoint_file,
     }
@@ -539,99 +660,116 @@ def run_flow_clip(
 
 def run_all_flow_clip(
     datasets: list[str] | None = None,
+    k_values: tuple[int | str, ...] = K_VALUES,
     seeds: tuple[int, ...] = SEEDS,
+    step_counts: tuple[int, ...] = STEP_COUNTS,
+    objectives: tuple[str, ...] = (STANDARD, ROLLED),
     feature_root: Path | None = None,
+    subset_root: Path | None = None,
     results_root: Path | None = None,
     device: torch.device | None = None,
     max_epochs: int = MAX_EPOCHS,
-    solver_steps: tuple[int, ...] = SOLVER_STEPS,
     ce_weight: float = CE_WEIGHT,
     target_noise: float = TARGET_NOISE,
-    renormalize: bool = RENORMALIZE,
     record: bool = True,
     verbose: bool = True,
 ) -> dict:
-    """Train the flow-matching layer on every dataset and seed.
+    """Run the whole Stage 2 grid.
+
+    Standard training is T-independent, so it trains once per (dataset, K, seed) and is
+    scored at every step count. Rolled-out training needs one field per step count.
 
     Args:
         datasets: Dataset keys; defaults to both Stage 1 datasets.
-        seeds: Seeds; each one re-initialises the field on the same training split.
+        k_values: Training-set sizes, defaulting to the Stage 1 protocol.
+        seeds: Seeds per training-set size.
+        step_counts: Euler step counts T.
+        objectives: Which objectives to run.
         feature_root: Feature cache directory; defaults to the resolved feature root.
+        subset_root: Subset index directory; defaults to the resolved subset root.
         results_root: Results directory; defaults to the resolved results root.
         device: Device to train on; defaults to CUDA when available.
         max_epochs: Number of training epochs.
-        solver_steps: Euler sub-step counts the accuracy curve is recomputed with.
-        ce_weight: Weight of the endpoint cross-entropy; 0 gives pure flow matching.
-        target_noise: Gaussian smoothing of the t=1 target.
-        renormalize: Keep the integration on the unit sphere.
+        ce_weight: Weight of the endpoint cross-entropy extension; 0 follows the brief.
+        target_noise: Gaussian smoothing of the target, an extension; 0 follows the brief.
         record: Append the results to ``runs.csv``.
-        verbose: Print per-epoch progress.
+        verbose: Print progress.
 
     Returns:
-        One result per run, keyed by ``"dataset/seed"``.
+        One result per trained field, keyed by ``"objective/dataset/k/seed/T"``.
     """
     datasets = datasets if datasets is not None else sorted(DATASET_SPECS)
     device = device if device is not None else default_device()
     print(f"Device: {device}")
 
-    jobs = [(dataset, seed) for dataset in datasets for seed in seeds]
+    jobs = []
+    for dataset in datasets:
+        for k in k_values:
+            for seed in seeds:
+                if STANDARD in objectives:
+                    jobs.append((STANDARD, dataset, k, seed, None))
+                if ROLLED in objectives:
+                    jobs.extend(
+                        (ROLLED, dataset, k, seed, count) for count in step_counts
+                    )
+
     results = {}
-    for dataset, seed in tqdm(jobs, desc="flow-matching layers"):
-        results[f"{dataset}/{seed}"] = run_flow_clip(
+    for objective, dataset, k, seed, steps in tqdm(jobs, desc="stage 2 grid"):
+        key = f"{objective}/{dataset}/{k}/{seed}/{steps if steps else 'any'}"
+        results[key] = run_flow_clip(
             dataset,
+            objective,
+            k,
             seed,
+            steps,
+            step_counts,
             feature_root,
+            subset_root,
             results_root,
             device,
             max_epochs,
-            solver_steps,
-            ce_weight=ce_weight,
-            target_noise=target_noise,
-            renormalize=renormalize,
+            ce_weight,
+            target_noise,
             record=record,
             verbose=verbose,
         )
 
-    print(f"\n{len(results)} flow-matching runs complete.")
+    print(f"\n{len(results)} flow-matching fields trained.")
     return results
 
 
 def summarize_flow_clip(results: dict) -> dict:
-    """Aggregate the runs into mean and standard deviation per dataset.
+    """Aggregate the grid into mean and standard deviation per setting.
 
     Args:
         results: Output of :func:`run_all_flow_clip`.
 
     Returns:
-        The t=0, best-t and t=1 accuracies plus the reference baselines, keyed by dataset.
+        Mean accuracy, spread and delta against the baseline, keyed by
+        ``"dataset/objective/T/K"``.
     """
-    grouped: dict[str, list[dict]] = {}
+    grouped: dict[str, list[float]] = {}
+    baselines: dict[str, float] = {}
+
     for result in results.values():
-        grouped.setdefault(result["dataset"], []).append(result)
+        baselines[result["dataset"]] = result["baseline_accuracy"]
+        for steps, value in result["accuracy_by_steps"].items():
+            key = f"{result['dataset']}/{result['objective']}/T{steps}/K{result['k']}"
+            grouped.setdefault(key, []).append(value)
 
     summary = {}
-    for dataset, runs in sorted(grouped.items()):
-        start = np.asarray([run["accuracy_t0"] for run in runs])
-        end = np.asarray([run["accuracy_t1"] for run in runs])
-        best = np.asarray([run["accuracy_at_best_time"] for run in runs])
-        times = [run["best_time"] for run in runs]
-        summary[dataset] = {
-            "t0_mean": float(start.mean()),
-            "t1_mean": float(end.mean()),
-            "t1_std": float(end.std(ddof=0)),
-            "best_mean": float(best.mean()),
-            "best_std": float(best.std(ddof=0)),
-            "best_times": times,
-            "zeroshot": runs[0]["zeroshot_accuracy"],
-            "constant_shift": runs[0]["constant_shift_accuracy"],
-            "runs": len(runs),
+    for key, values in sorted(grouped.items()):
+        dataset = key.split("/")[0]
+        array = np.asarray(values)
+        summary[key] = {
+            "mean": float(array.mean()),
+            "std": float(array.std(ddof=0)),
+            "delta": float(array.mean() - baselines[dataset]),
+            "runs": len(array),
         }
-        gain = best.mean() - start.mean()
         print(
-            f"{get_spec(dataset).display_name:<15} "
-            f"t=0 {start.mean():.4f} | best {best.mean():.4f} +/- {best.std(ddof=0):.4f} "
-            f"at t={times} | t=1 {end.mean():.4f}  "
-            f"=> {gain:+.4f} over the baseline (n={len(runs)})"
+            f"{key:<42} {array.mean():.4f} +/- {array.std(ddof=0):.4f}  "
+            f"delta {array.mean() - baselines[dataset]:+.4f}  (n={len(array)})"
         )
     return summary
 

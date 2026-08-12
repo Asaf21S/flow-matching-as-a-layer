@@ -35,14 +35,19 @@ def build_cells() -> list[dict]:
             """
 # Stage 2 — Flow Matching as a Layer in the CLIP Classifier
 
-Train an unconditional velocity field `v(x, t)` that transports a training image embedding
-at t=0 towards its class text embedding at t=1 along the straight conditional-OT path. At
-inference, integrate an **unlabelled** test embedding and run the same cosine 1-NN against
-the text prototypes as the Stage 1 baseline.
+Train an unconditional velocity field `v(z, t)` that transports a training image embedding
+at t=0 towards its frozen class text prototype at t=1 along the straight conditional-OT
+path. At inference, run T Euler steps of size 1/T on an **unlabelled** test embedding and
+apply the same cosine 1-NN against the text prototypes as the Stage 1 baseline.
 
 The field never takes a label as input, which is what makes it applicable at test time. It
-is zero-initialised at its output layer, so t=0 reproduces the Stage 1 zero-shot number
-exactly and the run asserts this.
+is a small MLP — two 512-wide hidden layers, SiLU, the scalar t simply concatenated to the
+input — and its output layer is zero-initialised, so an untrained field is the identity map
+and t=0 reproduces the Stage 1 zero-shot number exactly. Each diagnostic run asserts this.
+
+Two objectives are compared at T = 4 and T = 12, across K in {5, 10, full} and three seeds:
+the standard flow-matching velocity regression, and rolled-out training that backpropagates
+through the whole T-step Euler loop and supervises only the endpoint.
 
 Only the cached `clip_rn50` features are needed from Stage 1; cell 4 re-creates them if they
 are missing, so this notebook runs standalone.
@@ -202,17 +207,21 @@ report = prepare_datasets()
             """
 ## 6. Train the flow-matching layer
 
-Two datasets x 3 seeds, on the full training split. There is no K axis here, because the
-CLIP branch had a single baseline run rather than a K sweep.
+The grid follows the brief: two datasets x K in {5, 10, full} x seeds {0, 1, 2}, reusing the
+Stage 1 K-shot subsets so the comparison is like-for-like, and two objectives.
 
-The objective is the flow-matching regression plus a cross-entropy on the single-step
-estimate of the t=1 endpoint. Pure flow matching regresses onto `E[x_1 | x_t]`, which for a
-target set of only C prototypes is their posterior-weighted barycentre — the worst possible
-place for a cosine 1-NN, since every embedding lands near the centre of the prototype cloud.
-The cross-entropy term makes the layer optimise the metric it is actually scored on.
+- **Standard FM** regresses the velocity at a random point on the straight path,
+  `L = ||v(z_t, t) - (p_y - z_i)||^2`. It does not depend on T, so one field is trained per
+  (dataset, K, seed) and scored at both T = 4 and T = 12.
+- **Rolled-out FM** runs the same T-step Euler loop used at inference and supervises only
+  where it lands, `L = ||z_T - p_y||^2`, backpropagating through all T calls. T is baked in,
+  so it needs one field per T.
 
-Validation sweeps the whole time grid, not just t=1, and selects the stopping time as well
-as the epoch.
+Architecture, optimiser, epochs and batch size are identical across the two. Both are scored
+the same way: transport the test feature with T Euler steps of size 1/T, then cosine 1-NN on
+the endpoint `z_T`.
+
+54 trainings in total, all on cached features, so each is seconds to a couple of minutes.
 """
         ),
         code(
@@ -225,92 +234,140 @@ summary = summarize_flow_clip(flow_results)
         ),
         code(
             """
-# A single run, e.g. the seed the figures default to.
-from src.fmlayer.train.train_flow_clip import run_flow_clip
+# A single run, e.g. the configuration the figures default to.
+from src.fmlayer.train.train_flow_clip import ROLLED, STANDARD, run_flow_clip
 
-result = run_flow_clip("dtd", seed=0)
-print(result["accuracy_t0"], "->", result["accuracy_at_best_time"], "at t =", result["best_time"])
+standard = run_flow_clip("dtd", STANDARD, k="full", seed=0)
+rolled = run_flow_clip("dtd", ROLLED, k="full", seed=0, steps=12)
+
+print("baseline", standard["baseline_accuracy"])
+print("standard", standard["accuracy_by_steps"])
+print("rolled  ", rolled["accuracy_by_steps"])
 """
         ),
         markdown(
             """
-### Ablations
+### Extensions (not part of the brief)
 
-The knobs that matter, all exposed on `run_flow_clip` and `run_all_flow_clip`:
+`run_flow_clip` and `run_all_flow_clip` keep two knobs that are **off by default**, so the
+headline numbers are the assignment's bare regression. They exist for the discussion section
+only:
 
-- `ce_weight=0.0` — pure flow matching, no classification term. This is the configuration
-  whose accuracy *fell* below the baseline; keep it as the ablation.
-- `target_noise=0.0` — target stays a set of C atoms instead of C small clouds.
-- `renormalize=False` — integrate in the ambient space instead of on the unit sphere.
+- `ce_weight > 0` adds a cross-entropy on the single-step estimate of the t=1 endpoint, i.e.
+  it optimises the metric the layer is scored on rather than the velocity.
+- `target_noise > 0` turns the t=1 end into a small cloud around each prototype instead of
+  one of only C atoms.
+
+The sphere-projection variant has been removed entirely: the only Euler rule in the codebase
+is now the brief's `z[k+1] = z[k] + (1/T) v(z[k], k/T)`.
 """
         ),
         code(
             """
-pure_flow = run_flow_clip("dtd", seed=0, ce_weight=0.0, record=False, verbose=False)
-no_noise = run_flow_clip("dtd", seed=0, target_noise=0.0, record=False, verbose=False)
-flat = run_flow_clip("dtd", seed=0, renormalize=False, record=False, verbose=False)
+extended = run_flow_clip(
+    "dtd", STANDARD, k="full", seed=0, ce_weight=1.0, record=False, verbose=False
+)
 
-for name, run in [("full", result), ("ce_weight=0", pure_flow), ("no target noise", no_noise), ("no renormalize", flat)]:
-    print(f"{name:<18} t=0 {run['accuracy_t0']:.4f}  best {run['accuracy_at_best_time']:.4f} at t={run['best_time']:.1f}  t=1 {run['accuracy_t1']:.4f}")
+for name, run in [("brief (L_FM)", standard), ("+ endpoint CE", extended)]:
+    scores = "  ".join(f"T={t} {a:.4f}" for t, a in run["accuracy_by_steps"].items())
+    print(f"{name:<16} base {run['baseline_accuracy']:.4f}   {scores}")
 """
         ),
         markdown(
             """
-## 7. Accuracy as a function of t
+## 7. Deliverable 1 — accuracy versus K
 
-How classification changes as the layer moves each embedding from its original position
-(t=0, the baseline) towards the class text embeddings.
-
-Reference levels on every panel:
-
-- the **zero-shot baseline**, which the curve must start on at t=0;
-- the **constant-shift ablation**, which translates every embedding by the mean training
-  displacement. Note this is not a no-op: with unit-norm prototypes the shifted score is
-  `(z + m) . t_c = z . t_c + m . t_c`, and the bias `m . t_c` differs per class, so a shared
-  translation reorders the similarities. It is a lower bound to clear, not a neutral line;
-- the **validation-selected t**, the only point on the curve that is not chosen using test
-  data.
-
-The three Euler step counts should lie on top of each other; visible separation means the
-sweep is under-resolved.
+Every variant against the Stage 1 prototype baseline, with standard-deviation bars over the
+three seeds. Our baseline is zero-shot CLIP, which never sees the training subset, so it is a
+**flat line** and `dAcc(K) = Acc_FM(K) - Acc_zeroshot` is measured against a constant. For
+the linear-probe branch it would rise with K instead.
 """
         ),
         code(
             """
-from src.fmlayer.viz.flow_clip import plot_combined_accuracy_vs_t
+from src.fmlayer.report_stage2 import flow_table, print_flow_table
+from src.fmlayer.viz.flow_clip import plot_accuracy_vs_k
 
-plot_combined_accuracy_vs_t()
+table = flow_table()
+print_flow_table(table)
+plot_accuracy_vs_k(table)
+"""
+        ),
+        markdown(
+            """
+## 8. Deliverable 2 — training-loss curves
+
+Standard and rolled-out training are shown in **separate panels** on purpose: one is a
+velocity MSE against `p_y - z_i`, the other an endpoint MSE against `p_y`. They are not on
+the same scale, so overlaying them would be meaningless.
+"""
+        ),
+        code(
+            """
+from src.fmlayer.viz.flow_clip import plot_training_curves
+
+plot_training_curves("dtd")
+plot_training_curves("aircraft")
+"""
+        ),
+        markdown(
+            """
+## 9. Deliverable 3 — feature space before and after the layer
+
+Original features, after standard FM, and after rolled-out FM. The PCA is fitted **once**
+over all three feature sets and the prototypes together and then applied to each, so the
+panels share one coordinate system and the motion between them is real.
+
+Watch for contraction: if the class clouds collapse onto the prototype barycentre, the
+cosine 1-NN loses the separation it depends on, which is exactly what the accuracy table
+should then show.
+"""
+        ),
+        code(
+            """
+from src.fmlayer.viz.flow_clip import plot_feature_comparison
+
+plot_feature_comparison("dtd")
+plot_feature_comparison("aircraft")
+"""
+        ),
+        markdown(
+            """
+## 10. Deliverable 4 — flow trajectories for individual examples
+
+A handful of test features traced through the T Euler steps: circle = original feature,
+every intermediate state marked, square = transported endpoint, star = the class prototype.
+"""
+        ),
+        code(
+            """
+from src.fmlayer.viz.flow_clip import plot_flow_trajectories
+
+plot_flow_trajectories("dtd", ROLLED)
+plot_flow_trajectories("dtd", STANDARD)
+"""
+        ),
+        markdown(
+            """
+## 11. Diagnostic — accuracy along t
+
+Not a deliverable: the brief scores the endpoint `z_T`. This finely-integrated sweep exists
+to show *whether* accuracy peaks before t=1, which is what motivates rolled-out training. It
+needs a run recorded with `with_curve=True`; that run also asserts that t=0 reproduces the
+zero-shot baseline, since the field's output layer is zero-initialised.
 """
         ),
         code(
             """
 from src.fmlayer.viz.flow_clip import plot_accuracy_vs_t
 
-plot_accuracy_vs_t("aircraft", seed=0)
+run_flow_clip("dtd", STANDARD, k="full", seed=0, with_curve=True, record=False)
+plot_accuracy_vs_t("dtd", STANDARD)
 """
         ),
         markdown(
             """
-## 8. Trajectory snapshots in 2D
-
-The PCA basis is fitted once on the t=0 frame and reused for every later frame, so the
-panels share one coordinate system and the motion is real rather than a re-projection.
-
-Watch for contraction: if the class clouds merge into one blob by t=1, the transport has
-destroyed the separation the cosine 1-NN depends on, and the accuracy curve will say so.
-"""
-        ),
-        code(
-            """
-from src.fmlayer.viz.flow_clip import plot_trajectory_embeddings
-
-plot_trajectory_embeddings("dtd", seed=0)
-plot_trajectory_embeddings("aircraft", seed=0)
-"""
-        ),
-        markdown(
-            """
-## 9. Reverse flow, rendered by retrieval
+## 12. Optional — reverse flow, rendered by retrieval
 
 Flow matching is time-symmetric, so the same field integrated from t=1 down to t=0 carries
 each class *text* embedding back into image-embedding space. Each intermediate point is
@@ -318,7 +375,7 @@ rendered as the nearest real training image in cosine similarity — no decoder,
 leaves the CLIP RN50 space the field was trained in.
 
 Read it as "what does this point in embedding space look like", not as generation: the
-forward map is many-to-one, so the reverse path from exactly `t_c` is a single deterministic
+forward map is many-to-one, so the reverse path from exactly `p_c` is a single deterministic
 trajectory towards an average class image. Real generation would need an unCLIP-style
 decoder, which is conditioned on CLIP ViT-L/14 rather than RN50.
 
@@ -329,33 +386,23 @@ Needs the datasets (cell 4 or 5).
             """
 from src.fmlayer.viz.flow_clip import plot_reverse_retrieval
 
-plot_reverse_retrieval("dtd", seed=0)
+plot_reverse_retrieval("dtd", ROLLED)
 """
         ),
-        markdown("## 10. Report: table and all figures"),
+        markdown("## 13. Report: table and all figures in one call"),
         code(
             """
 from src.fmlayer.report_stage2 import make_stage2_report
 
-report = make_stage2_report()
-"""
-        ),
-        code(
-            """
-# Skip the image-decoding panels when the datasets were not downloaded this session.
-# report = make_stage2_report(with_retrieval=False)
-
-from src.fmlayer.report_stage2 import flow_table, print_flow_table
-
-table = flow_table()
-print_flow_table(table)
+# Pass with_retrieval=True to add the image-decoding panels (needs the datasets).
+report = make_stage2_report(with_retrieval=False)
 """
         ),
         markdown(
             """
 The aggregated table lands in `<results>/flow_accuracy_table.csv`. Rows also go to the
-shared `runs.csv` under `method = "fm_clip"` with the integration time in the `t` column;
-Stage 1 rows carry `t = "none"` and are unaffected.
+shared `runs.csv` under `method = "fm_clip_standard"` or `"fm_clip_rolled"`, with T in the
+`steps` column; Stage 1 rows carry `steps = "none"` and are unaffected.
 """
         ),
     ]
