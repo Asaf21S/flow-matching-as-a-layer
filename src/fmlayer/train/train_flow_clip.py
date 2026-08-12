@@ -41,11 +41,15 @@ ENCODER = ClipRN50Encoder.NAME
 # The brief evaluates T in {4, 12}.
 STEP_COUNTS = (4, 12)
 LEARNING_RATE = 1e-3
+# Cosine-annealed to this floor over the run. At a constant 1e-3 the loss was still falling
+# log-linearly at epoch 300 and validation accuracy was still climbing in most runs, so the
+# field never got to settle; decaying the step size is what lets it converge.
+MIN_LEARNING_RATE = 1e-5
 WEIGHT_DECAY = 1e-4
 BATCH_SIZE = 256
-MAX_EPOCHS = 300
+MAX_EPOCHS = 1000
 EVAL_EVERY = 10
-PRINT_EVERY = 50
+PRINT_EVERY = 100
 
 # Extensions, off by default. The brief's objective is the bare velocity regression.
 CE_WEIGHT = 0.0
@@ -242,6 +246,7 @@ def train_flow(
     batch_size: int = BATCH_SIZE,
     learning_rate: float = LEARNING_RATE,
     weight_decay: float = WEIGHT_DECAY,
+    min_learning_rate: float = MIN_LEARNING_RATE,
     eval_every: int = EVAL_EVERY,
     ce_weight: float = CE_WEIGHT,
     temperature: float = TEMPERATURE,
@@ -268,8 +273,9 @@ def train_flow(
         step_counts: Euler step counts used for validation, and for the rollout when rolled.
         max_epochs: Number of epochs.
         batch_size: Examples per optimisation step.
-        learning_rate: AdamW learning rate.
+        learning_rate: Peak AdamW learning rate.
         weight_decay: AdamW weight decay.
+        min_learning_rate: Floor the cosine schedule anneals the learning rate down to.
         eval_every: Epochs between validation sweeps.
         ce_weight: Weight of the endpoint cross-entropy extension; 0 follows the brief.
         temperature: Softmax temperature of that extension.
@@ -287,6 +293,9 @@ def train_flow(
     path = build_path()
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max_epochs, eta_min=min_learning_rate
     )
     generator = torch.Generator(device="cpu").manual_seed(seed)
     train_steps = step_counts[0] if objective == ROLLED else 0
@@ -335,6 +344,7 @@ def train_flow(
             "epoch": epoch,
             "train_loss": loss_total / num_train,
             "class_loss": class_total / num_train,
+            "lr": scheduler.get_last_lr()[0],
         }
 
         if epoch % eval_every == 0 or epoch == max_epochs:
@@ -361,6 +371,7 @@ def train_flow(
             print(f"  epoch {epoch:3d}  loss {entry['train_loss']:.6f}")
 
         history.append(entry)
+        scheduler.step()
 
     model.load_state_dict(best_state)
     return model, history, best_epoch

@@ -13,7 +13,7 @@ from src.fmlayer.data.datasets import build_dataset, get_class_names, get_target
 from src.fmlayer.data.fewshot import K_FULL
 from src.fmlayer.data.specs import DATASET_SPECS, get_spec
 from src.fmlayer.features.cache import load_split
-from src.fmlayer.models.flow_ode import MANUAL_EULER, integrate, make_time_grid, rollout_trajectory
+from src.fmlayer.models.flow_ode import MANUAL_EULER, integrate, rollout_trajectory
 from src.fmlayer.models.retrieval import nearest_neighbors
 from src.fmlayer.train.train_flow_clip import (
     ENCODER,
@@ -269,8 +269,13 @@ def plot_feature_comparison(
 ) -> Path | None:
     """Deliverable 3: original vs standard-FM vs rolled-out features, jointly projected.
 
-    The PCA is fitted once over all three feature sets and the prototypes together, so the
-    three panels are the same low-dimensional representation and are directly comparable.
+    One PCA basis is shared by all three panels, so they are directly comparable. The basis
+    is fitted on the *original* features and the prototypes alone, which is exactly the
+    Stage 1 embedding basis, so the first panel reproduces the Stage 1 CLIP RN50 panel and
+    the other two show where the layer moved that same cloud. Fitting on all three views at
+    once instead would let the transported clouds dominate the variance: two thirds of the
+    points would sit on the text side of the modality gap, PC1 would become the gap
+    direction and the original cloud would collapse to a sliver.
 
     Args:
         dataset: Dataset key.
@@ -307,7 +312,7 @@ def plot_feature_comparison(
     }
 
     projector = PCA(n_components=2, random_state=PROJECTION_SEED)
-    projector.fit(np.concatenate(list(views.values()) + [prototypes]))
+    projector.fit(np.concatenate([features, prototypes]))
     frames = {name: projector.transform(value) for name, value in views.items()}
     prototype_xy = projector.transform(prototypes)
 
@@ -359,7 +364,7 @@ def plot_feature_comparison(
     )
     fig.suptitle(
         f"{get_spec(dataset).display_name}: feature space before and after the FM layer "
-        f"(stars = class prototypes, joint PCA)",
+        f"(stars = class prototypes, Stage 1 PCA basis)",
         fontsize=13,
         y=1.03,
     )
