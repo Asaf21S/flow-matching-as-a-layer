@@ -88,8 +88,12 @@ def plot_flow_vector_field_2d(
         arrowsize=1.2,
     )
 
+    objective = metadata.get("objective", "standard")
+    target_type = metadata.get("target_type", "centroids")
+    title = f"[{objective} - {target_type}] Vector Field $v_\\theta(z_t, t={t:.1f})$ | {dataset.upper()}"
+
     ax.set_title(
-        f"Flow Matching Vector Field $v_\\theta(z_t, t={t:.1f})$ (2D PCA)",
+        title,
         pad=10,
     )
     ax.set_xticks([])
@@ -171,8 +175,12 @@ def plot_flow_trajectories_2d(
         # Legend entry
         ax.scatter([], [], color=color, label=normalize_class_name(cname), s=40)
 
+    objective = metadata.get("objective", "standard")
+    target_type = metadata.get("target_type", "centroids")
+    title = f"[{objective} - {target_type}] ODE Sample Trajectories ($z_0 \\rightarrow z_1$) | {dataset.upper()}"
+
     ax.set_title(
-        "Flow Matching ODE Sample Trajectories ($z_0 \\rightarrow z_1$)",
+        title,
         pad=10,
     )
     ax.set_xticks([])
@@ -244,7 +252,11 @@ def plot_before_after_embeddings(
 
     handles, legend_labels = ax1.get_legend_handles_labels()
     fig.legend(handles, legend_labels, loc="center left", bbox_to_anchor=(0.98, 0.5), frameon=True, framealpha=0.95)
-    fig.suptitle("Flow Matching Representation Refinement (2D PCA Projection)", fontsize=13, y=1.02)
+    
+    objective = metadata.get("objective", "standard")
+    target_type = metadata.get("target_type", "centroids")
+    title = f"[{objective} - {target_type}] Representation Refinement | {dataset.upper()}"
+    fig.suptitle(title, fontsize=13, y=1.02)
     fig.tight_layout()
 
     save_figure(fig, "flow_before_after_pca", figures_root, show=show, save=save)
