@@ -123,40 +123,50 @@ class FlowConfig:
         return (self.train_steps,) if self.uses_rollout else tuple(step_counts)
 
 
-def baseline_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
-    """The variants the brief asks for: standard and rolled-out FM, both values of T."""
-    configs = [FlowConfig(STANDARD, target) for target in (CENTROIDS, PROBE_WEIGHTS)]
-    configs += [
-        FlowConfig(ROLLED_MSE, target, steps)
-        for target in (CENTROIDS, PROBE_WEIGHTS)
-        for steps in step_counts
-    ]
-    configs += [FlowConfig(ROLLED_CE, NO_TARGET, steps) for steps in step_counts]
-    return tuple(configs)
+def default_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
+    """The eight configurations the full grid runs.
 
-
-def proposed_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
-    """Variants added to try to beat the frozen-probe baseline.
-
-    The margin target only moves points the probe gets wrong, the hybrid objective
-    anchors the classification loss geometrically, and the noise variants stop the
-    rolled classification loss from starting out already saturated.
-
-    Screening on DTD / ResNet-18 / K=10 put every one of these below the baseline, in an
-    order that tracked how far each moved its features. Noise helped; cross-fitting hurt
-    and now lives in :func:`negative_control_configs`. See ``docs/PLAN_stage3.md`` §8.
+    Selected by screening every variant on all three cells at K=full, seed 0. Each entry
+    is either a winner on at least one cell or the reference a winner has to be read
+    against, and together they still span the objective x target comparison. See
+    ``docs/PLAN_stage3.md`` §8.
     """
-    longest = max(step_counts)
-    configs = [FlowConfig(STANDARD, MARGIN)]
-    configs += [FlowConfig(ROLLED_MSE, MARGIN, steps) for steps in step_counts]
-    configs += [FlowConfig(HYBRID, MARGIN, steps) for steps in step_counts]
-    configs += [
-        FlowConfig(HYBRID, PROBE_WEIGHTS, longest),
-        FlowConfig(STANDARD, MARGIN, noise_std=0.15),
+    shortest, longest = min(step_counts), max(step_counts)
+    return (
+        # Naive flow matching to class means: the reference everything else is read against.
+        FlowConfig(STANDARD, CENTROIDS),
+        # Transport toward the probe's own weight directions: strongest family on DINOv2.
         FlowConfig(STANDARD, PROBE_WEIGHTS, noise_std=0.15),
+        FlowConfig(ROLLED_MSE, PROBE_WEIGHTS, shortest),
+        FlowConfig(HYBRID, PROBE_WEIGHTS, longest),
+        # Minimal margin corrections: the only family positive on every cell.
+        FlowConfig(STANDARD, MARGIN, noise_std=0.15),
+        FlowConfig(ROLLED_MSE, MARGIN, longest),
+        FlowConfig(HYBRID, MARGIN, longest),
+        # Pure classification loss, no geometric target.
+        FlowConfig(ROLLED_CE, NO_TARGET, longest),
+    )
+
+
+def exploratory_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
+    """Variants that were screened and dropped, kept so the pruning stays reproducible.
+
+    ``rolled_mse`` toward class centroids was negative on all three cells (-0.006 to
+    -0.074). The rest are each dominated by an entry in :func:`default_configs`, usually
+    by their noised version or by their other step count.
+    """
+    shortest, longest = min(step_counts), max(step_counts)
+    return (
+        FlowConfig(STANDARD, PROBE_WEIGHTS),
+        FlowConfig(STANDARD, MARGIN),
+        FlowConfig(ROLLED_MSE, CENTROIDS, shortest),
+        FlowConfig(ROLLED_MSE, CENTROIDS, longest),
+        FlowConfig(ROLLED_MSE, PROBE_WEIGHTS, longest),
+        FlowConfig(ROLLED_MSE, MARGIN, shortest),
+        FlowConfig(ROLLED_CE, NO_TARGET, shortest),
+        FlowConfig(HYBRID, MARGIN, shortest),
         FlowConfig(ROLLED_MSE, PROBE_WEIGHTS, longest, noise_std=0.15, mixup_alpha=0.3),
-    ]
-    return tuple(configs)
+    )
 
 
 def negative_control_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
@@ -165,8 +175,7 @@ def negative_control_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tupl
     Cross-fitting was meant to de-saturate the rolled classification loss. It does, but
     the flow then learns the fold probes' boundaries while being scored against the full
     probe, so the corrections are aimed at the wrong decision surface: ``rolled_ce`` fell
-    from -0.056 to -0.080. Excluded from :func:`default_configs` so the grid does not
-    spend compute on them; run explicitly to reproduce the finding.
+    from -0.056 to -0.080. Run explicitly to reproduce the finding.
     """
     longest = max(step_counts)
     return (
@@ -175,9 +184,13 @@ def negative_control_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tupl
     )
 
 
-def default_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
-    """Every variant: the brief's baseline set plus the proposed improvements."""
-    return baseline_configs(step_counts) + proposed_configs(step_counts)
+def all_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
+    """Every configuration ever screened, including the dropped and control ones."""
+    return (
+        default_configs(step_counts)
+        + exploratory_configs(step_counts)
+        + negative_control_configs(step_counts)
+    )
 
 
 def same_class_permutation(labels: Tensor, generator: torch.Generator) -> Tensor:
