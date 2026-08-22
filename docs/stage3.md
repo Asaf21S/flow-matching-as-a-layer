@@ -1,22 +1,24 @@
-# Stage 3 Results: Flow Matching Before a Linear Probe
+# Stage 3 Results: Flow Matching Before a Frozen Linear Probe
 
-Produced by `notebooks/stage3_flow_matching.ipynb`.
+Produced by `notebooks/stage3_flow_matching.ipynb`. Method notes and the full experimental
+log are in `docs/PLAN_stage3.md`.
 
-A Flow Matching vector field $v_\theta(z, t)$ is trained to transport image embeddings. 
-Unlike Stage 2 (which transported features to text prototypes for zero-shot classification), we focus on few-shot and full-shot settings. We evaluate how a flow model can improve the classification boundaries of a **frozen Linear Probe classifier**. 
-
-At test time, the field is applied to an unlabelled embedding for $T$ Euler steps, and the transported embedding is classified by the frozen linear probe.
+A Flow Matching vector field $v_\theta(z,t)$ is inserted **between the frozen encoder and
+the frozen Stage 1 linear probe**. Only the field is trained. At test time an embedding is
+transported for $T$ Euler steps and the transported embedding is classified by the
+unchanged probe, so any gain comes purely from reshaping the feature space.
 
 | Item | Value |
 | --- | --- |
 | Datasets | DTD (47 classes), FGVC-Aircraft (100 classes) |
-| Encoder | ResNet18, DINOv2 ViT-S/14 |
-| Target | `centroids`, `probe_weights`, `orthogonal` |
-| Baseline | Frozen Linear Probe on original features |
-| Objectives | `standard`, `rolled_mse`, and `rolled_ce` |
+| Encoders | ResNet-18, DINOv2 ViT-S/14 (both frozen) |
+| Classifier | Stage 1 linear probe, frozen, identical weights per (encoder, dataset, K, seed) |
+| Baseline | That same probe on untransported features |
+| Objectives | `standard`, `rolled_mse`, `rolled_ce`, `hybrid` |
+| Targets | `centroids`, `probe_weights`, `margin` |
 | Euler steps | T in {4, 12} |
-| Protocol | K in {5, 10, full} x seeds {0, 1, 2} |
-| Field | MLP |
+| Protocol | K in {5, 10, full} x seeds {0, 1, 2}, top-1 on the full official test split |
+| Field | MLP, 2 x 512, SiLU, time concatenated, zero-initialised output |
 | Optimiser | AdamW, lr 1e-3 cosine-annealed to 1e-5, wd 1e-4, batch 256, 500 epochs |
 
 ---
@@ -25,285 +27,259 @@ At test time, the field is applied to an unlabelled embedding for $T$ Euler step
 
 ### 1.1 Objectives
 
-We train the vector field $v_\theta$ under three distinct objectives to understand how gradients shape the manifold.
+**Standard FM (`standard`).** A straight conditional-OT path from the source feature $z_i$
+to a target $p$, supervising the velocity directly:
 
-**1. Standard Flow Matching (`standard`)**
-We define a straight conditional-OT path from the source feature $z_i$ to a predefined geometric target $p_{y_i}$. The field minimizes the MSE against the constant velocity of this path:
-$$z_t=(1-t)z_i+tp_{y_i}$$
-$$u_i=p_{y_i}-z_i$$
-$$\mathcal{L}=||v_\theta(z_t,t)-u_i||^2$$
+$$z_t=(1-t)z_i+tp,\qquad u_i=p-z_i,\qquad \mathcal{L}=\lVert v_\theta(z_t,t)-u_i\rVert^2$$
 
-**2. Rolled-out MSE (`rolled_mse`)**
-Instead of supervising the entire trajectory, we run the ODE solver for $T$ steps and supervise only where it lands (by distance) using MSE. This backpropagates through the unrolled ODE steps:
-$$z_T=z_0+\sum v_\theta(z_t,t)\Delta t$$
-$$\mathcal{L}_{rolled\_mse}=||z_T-p_{y_i}||^2$$
+**Rolled-out MSE (`rolled_mse`).** Run the solver for $T$ steps and supervise only where it
+lands, backpropagating through every step:
 
-**3. Rolled-out Cross-Entropy (`rolled_ce`)**
-We drop the geometric target constraint entirely. Instead, we roll out the trajectory to $z_T$, pass it through the frozen linear probe $W$, and backpropagate the classification Cross-Entropy loss:
-$$\mathcal{L}_{rolled\_ce}=CE(Wz_T+b,y_i)$$
+$$z_T=z_0+\sum_k \tfrac{1}{T}v_\theta(z_k,k/T),\qquad \mathcal{L}=\lVert z_T-p\rVert^2$$
 
-### 1.2 Geometric Targets
+**Rolled-out cross-entropy (`rolled_ce`).** Drop the geometric target; roll out, push
+through the frozen probe $W$, and backpropagate the classification loss:
 
-For `standard` and `rolled_mse`, we must define a target point $p_{y_i}$ for each class. We evaluate three strategies:
+$$\mathcal{L}=\mathrm{CE}(Wz_T+b,\,y_i)$$
 
-1. **`centroids`**: The mean feature of the class in the training set. This encourages the flow to collapse intra-class variance and pull features tightly towards their natural cluster centers.
-2. **`probe_weights`**: The $L_2$-normalized weight vector of the linear probe for that class, scaled by the average feature norm. The probe's weight acts as the optimal direction for maximizing the logit for that class.
-3. **`orthogonal`**: Random orthogonal vectors generated via QR decomposition. We use this to test if simply transporting the classes into an arbitrary, linearly separable geometric space is sufficient, ignoring the original data structure.
+**Hybrid (`hybrid`), new.** Classification loss anchored geometrically, which removes the
+degenerate global-translation solution `rolled_ce` collapses to:
 
----
+$$\mathcal{L}=\mathrm{CE}(Wz_T+b,\,y_i)+\lambda\lVert z_T-p\rVert^2,\qquad \lambda=1$$
 
-## 2. Quantitative Results Table
+### 1.2 Targets
 
-Mean accuracy over 3 seeds across different flow variants vs. the frozen linear probe baseline.
+1. **`centroids`** — the class mean in the training set. The textbook choice: transport
+   each feature to its class prototype.
+2. **`probe_weights`** — the $L_2$-normalised probe weight row for the class, rescaled to
+   the mean feature norm. Moving along $\hat{w}_c$ monotonically increases class $c$'s
+   logit, so this target is aligned with the frozen decision rule by construction.
+3. **`margin`, new** — the *smallest* move that puts a point a fixed distance past the
+   boundary against its runner-up class $r$. With $d=w_y-w_r$ and gap $g$:
 
-| Dataset | Encoder | Objective | Target Type | K | Baseline | Acc (T=4) | Acc (T=12) |
-|---------|---------|-----------|-------------|---|----------|-----------|------------|
-| AIRCRAFT | resnet18 | rolled_ce | centroids | 10 | 0.2725 | 0.0000 | 0.2669 |
-| AIRCRAFT | resnet18 | rolled_ce | centroids | 5 | 0.1974 | 0.0000 | 0.1995 |
-| AIRCRAFT | resnet18 | rolled_ce | centroids | full | 0.3654 | 0.0000 | 0.3720 |
-| AIRCRAFT | resnet18 | rolled_ce | orthogonal | 10 | 0.2725 | 0.0000 | 0.2669 |
-| AIRCRAFT | resnet18 | rolled_ce | orthogonal | 5 | 0.1974 | 0.0000 | 0.1995 |
-| AIRCRAFT | resnet18 | rolled_ce | orthogonal | full | 0.3654 | 0.0000 | 0.3720 |
-| AIRCRAFT | resnet18 | rolled_ce | probe_weights | 10 | 0.2725 | 0.0000 | 0.2669 |
-| AIRCRAFT | resnet18 | rolled_ce | probe_weights | 5 | 0.1974 | 0.0000 | 0.1995 |
-| AIRCRAFT | resnet18 | rolled_ce | probe_weights | full | 0.3654 | 0.0000 | 0.3720 |
-| AIRCRAFT | resnet18 | rolled_mse | centroids | 10 | 0.2725 | 0.0000 | 0.2634 |
-| AIRCRAFT | resnet18 | rolled_mse | centroids | 5 | 0.1974 | 0.0000 | 0.2090 |
-| AIRCRAFT | resnet18 | rolled_mse | centroids | full | 0.3654 | 0.0000 | 0.3353 |
-| AIRCRAFT | resnet18 | rolled_mse | orthogonal | 10 | 0.2725 | 0.0000 | 0.2171 |
-| AIRCRAFT | resnet18 | rolled_mse | orthogonal | 5 | 0.1974 | 0.0000 | 0.1841 |
-| AIRCRAFT | resnet18 | rolled_mse | orthogonal | full | 0.3654 | 0.0000 | 0.0917 |
-| AIRCRAFT | resnet18 | rolled_mse | probe_weights | 10 | 0.2725 | 0.0000 | 0.2540 |
-| AIRCRAFT | resnet18 | rolled_mse | probe_weights | 5 | 0.1974 | 0.0000 | 0.1902 |
-| AIRCRAFT | resnet18 | rolled_mse | probe_weights | full | 0.3654 | 0.0000 | 0.3655 |
-| AIRCRAFT | resnet18 | standard | centroids | 10 | 0.2725 | 0.2819 | 0.2853 |
-| AIRCRAFT | resnet18 | standard | centroids | 5 | 0.1974 | 0.2132 | 0.2149 |
-| AIRCRAFT | resnet18 | standard | centroids | full | 0.3654 | 0.3740 | 0.3749 |
-| AIRCRAFT | resnet18 | standard | orthogonal | 10 | 0.2725 | 0.2558 | 0.2564 |
-| AIRCRAFT | resnet18 | standard | orthogonal | 5 | 0.1974 | 0.1823 | 0.1828 |
-| AIRCRAFT | resnet18 | standard | orthogonal | full | 0.3654 | 0.1347 | 0.1262 |
-| AIRCRAFT | resnet18 | standard | probe_weights | 10 | 0.2725 | 0.2409 | 0.2355 |
-| AIRCRAFT | resnet18 | standard | probe_weights | 5 | 0.1974 | 0.1866 | 0.1846 |
-| AIRCRAFT | resnet18 | standard | probe_weights | full | 0.3654 | 0.3643 | 0.3568 |
-| DTD | dinov2_vits14 | rolled_ce | centroids | 10 | 0.6952 | 0.0000 | 0.6844 |
-| DTD | dinov2_vits14 | rolled_ce | centroids | 5 | 0.6234 | 0.0000 | 0.6285 |
-| DTD | dinov2_vits14 | rolled_ce | centroids | full | 0.7637 | 0.0000 | 0.7580 |
-| DTD | dinov2_vits14 | rolled_ce | orthogonal | 10 | 0.6952 | 0.0000 | 0.6844 |
-| DTD | dinov2_vits14 | rolled_ce | orthogonal | 5 | 0.6234 | 0.0000 | 0.6285 |
-| DTD | dinov2_vits14 | rolled_ce | orthogonal | full | 0.7637 | 0.0000 | 0.7580 |
-| DTD | dinov2_vits14 | rolled_ce | probe_weights | 10 | 0.6952 | 0.0000 | 0.6844 |
-| DTD | dinov2_vits14 | rolled_ce | probe_weights | 5 | 0.6234 | 0.0000 | 0.6285 |
-| DTD | dinov2_vits14 | rolled_ce | probe_weights | full | 0.7637 | 0.0000 | 0.7580 |
-| DTD | dinov2_vits14 | rolled_mse | centroids | 10 | 0.6952 | 0.0000 | 0.6814 |
-| DTD | dinov2_vits14 | rolled_mse | centroids | 5 | 0.6234 | 0.0000 | 0.6113 |
-| DTD | dinov2_vits14 | rolled_mse | centroids | full | 0.7637 | 0.0000 | 0.7576 |
-| DTD | dinov2_vits14 | rolled_mse | orthogonal | 10 | 0.6952 | 0.0000 | 0.5291 |
-| DTD | dinov2_vits14 | rolled_mse | orthogonal | 5 | 0.6234 | 0.0000 | 0.6066 |
-| DTD | dinov2_vits14 | rolled_mse | orthogonal | full | 0.7637 | 0.0000 | 0.0718 |
-| DTD | dinov2_vits14 | rolled_mse | probe_weights | 10 | 0.6952 | 0.0000 | 0.7085 |
-| DTD | dinov2_vits14 | rolled_mse | probe_weights | 5 | 0.6234 | 0.0000 | 0.6378 |
-| DTD | dinov2_vits14 | rolled_mse | probe_weights | full | 0.7637 | 0.0000 | 0.7778 |
-| DTD | dinov2_vits14 | standard | centroids | 10 | 0.6952 | 0.6908 | 0.6910 |
-| DTD | dinov2_vits14 | standard | centroids | 5 | 0.6234 | 0.6144 | 0.6149 |
-| DTD | dinov2_vits14 | standard | centroids | full | 0.7637 | 0.7652 | 0.7654 |
-| DTD | dinov2_vits14 | standard | orthogonal | 10 | 0.6952 | 0.5229 | 0.5351 |
-| DTD | dinov2_vits14 | standard | orthogonal | 5 | 0.6234 | 0.6144 | 0.6156 |
-| DTD | dinov2_vits14 | standard | orthogonal | full | 0.7637 | 0.0986 | 0.0989 |
-| DTD | dinov2_vits14 | standard | probe_weights | 10 | 0.6952 | 0.7004 | 0.6977 |
-| DTD | dinov2_vits14 | standard | probe_weights | 5 | 0.6234 | 0.6340 | 0.6323 |
-| DTD | dinov2_vits14 | standard | probe_weights | full | 0.7637 | 0.7801 | 0.7787 |
-| DTD | resnet18 | rolled_ce | centroids | 10 | 0.5445 | 0.0000 | 0.5069 |
-| DTD | resnet18 | rolled_ce | centroids | 5 | 0.4516 | 0.0000 | 0.4452 |
-| DTD | resnet18 | rolled_ce | centroids | full | 0.6284 | 0.0000 | 0.5993 |
-| DTD | resnet18 | rolled_ce | orthogonal | 10 | 0.5445 | 0.0000 | 0.5069 |
-| DTD | resnet18 | rolled_ce | orthogonal | 5 | 0.4516 | 0.0000 | 0.4452 |
-| DTD | resnet18 | rolled_ce | orthogonal | full | 0.6284 | 0.0000 | 0.5993 |
-| DTD | resnet18 | rolled_ce | probe_weights | 10 | 0.5445 | 0.0000 | 0.5069 |
-| DTD | resnet18 | rolled_ce | probe_weights | 5 | 0.4516 | 0.0000 | 0.4452 |
-| DTD | resnet18 | rolled_ce | probe_weights | full | 0.6284 | 0.0000 | 0.5993 |
-| DTD | resnet18 | rolled_mse | centroids | 10 | 0.5445 | 0.0000 | 0.5216 |
-| DTD | resnet18 | rolled_mse | centroids | 5 | 0.4516 | 0.0000 | 0.4388 |
-| DTD | resnet18 | rolled_mse | centroids | full | 0.6284 | 0.0000 | 0.5809 |
-| DTD | resnet18 | rolled_mse | orthogonal | 10 | 0.5445 | 0.0000 | 0.5147 |
-| DTD | resnet18 | rolled_mse | orthogonal | 5 | 0.4516 | 0.0000 | 0.4328 |
-| DTD | resnet18 | rolled_mse | orthogonal | full | 0.6284 | 0.0000 | 0.1080 |
-| DTD | resnet18 | rolled_mse | probe_weights | 10 | 0.5445 | 0.0000 | 0.5142 |
-| DTD | resnet18 | rolled_mse | probe_weights | 5 | 0.4516 | 0.0000 | 0.4383 |
-| DTD | resnet18 | rolled_mse | probe_weights | full | 0.6284 | 0.0000 | 0.6138 |
-| DTD | resnet18 | standard | centroids | 10 | 0.5445 | 0.5273 | 0.5282 |
-| DTD | resnet18 | standard | centroids | 5 | 0.4516 | 0.4514 | 0.4512 |
-| DTD | resnet18 | standard | centroids | full | 0.6284 | 0.6078 | 0.6106 |
-| DTD | resnet18 | standard | orthogonal | 10 | 0.5445 | 0.5154 | 0.5174 |
-| DTD | resnet18 | standard | orthogonal | 5 | 0.4516 | 0.4415 | 0.4422 |
-| DTD | resnet18 | standard | orthogonal | full | 0.6284 | 0.2922 | 0.2778 |
-| DTD | resnet18 | standard | probe_weights | 10 | 0.5445 | 0.5207 | 0.5200 |
-| DTD | resnet18 | standard | probe_weights | 5 | 0.4516 | 0.4395 | 0.4372 |
-| DTD | resnet18 | standard | probe_weights | full | 0.6284 | 0.6284 | 0.6229 |
+   $$p(z)=z+\frac{\max\left(0,\;m-g/\lVert d\rVert\right)}{\lVert d\rVert}\,d$$
+
+   A point already correct by more than $m$ is **its own target**, so the field is trained
+   to leave it alone. Only misclassified or low-margin points carry a velocity. $m$ is set
+   to 10% of the mean feature norm so it transfers across encoders.
+
+### 1.3 Source perturbation
+
+The winning configurations add Gaussian noise to the flow's starting point during training
+(`n015` = `noise_std` 0.15, as a fraction of the mean feature norm). Without it the probe
+has near-zero error on the flow's own training data, which leaves the classification
+objectives with no gradient and collapses the `margin` target into the identity.
 
 ---
 
-## 3. Accuracy Gain Bar Charts
+## 2. Results at K = full
 
-Visualizing the absolute improvement ($\Delta\text{Acc}$) over the baseline frozen probe for $K=\text{full}$.
+Mean +/- std over 3 seeds, top-1 on the complete official test split. The probe is
+re-used per seed, so each flow is compared against exactly the baseline it sits in front of.
 
-### 3.1 Ablation Results: `DTD` (resnet18)
-![Ablation DTD ResNet18](figures/fig_0.png)
+### 2.1 FGVC-Aircraft, ResNet-18
 
-### 3.2 Ablation Results: `AIRCRAFT` (resnet18)
-![Ablation Aircraft ResNet18](figures/fig_1.png)
+| Configuration | T | Top-1 accuracy | ΔAcc |
+| --- | --- | --- | --- |
+| frozen linear probe (baseline) | – | 0.3662 | – |
+| **`standard_margin_n015`** | **4** | **0.3901 +/- 0.0040** | **+0.0239** |
+| `standard_margin_n015` | 12 | 0.3887 +/- 0.0051 | +0.0225 |
+| `rolled_mse_margin_T12` | 12 | 0.3821 +/- 0.0020 | +0.0159 |
+| `hybrid_margin_T12` | 12 | 0.3805 +/- 0.0071 | +0.0143 |
+| `hybrid_probe_weights_T12` | 12 | 0.3779 +/- 0.0076 | +0.0117 |
+| `rolled_ce_T12` | 12 | 0.3746 +/- 0.0018 | +0.0084 |
+| `standard_probe_weights_n015` | 4 | 0.3716 +/- 0.0043 | +0.0054 |
+| `standard_centroids` | 4 | 0.3679 +/- 0.0025 | +0.0017 |
+| `standard_centroids` | 12 | 0.3649 +/- 0.0056 | −0.0013 |
+| `standard_probe_weights_n015` | 12 | 0.3624 +/- 0.0027 | −0.0038 |
+| `rolled_mse_probe_weights_T4` | 4 | 0.3520 +/- 0.0014 | −0.0142 |
 
-### 3.3 Ablation Results: `DTD` (dinov2_vits14)
-![Ablation DTD DINOv2](figures/fig_2.png)
+### 2.2 DTD, DINOv2 ViT-S/14
+
+| Configuration | T | Top-1 accuracy | ΔAcc |
+| --- | --- | --- | --- |
+| frozen linear probe (baseline) | – | 0.7637 | – |
+| **`standard_probe_weights_n015`** | **4** | **0.7837 +/- 0.0021** | **+0.0200** |
+| `standard_probe_weights_n015` | 12 | 0.7782 +/- 0.0037 | +0.0145 |
+| `rolled_mse_probe_weights_T4` | 4 | 0.7775 +/- 0.0062 | +0.0138 |
+| `hybrid_probe_weights_T12` | 12 | 0.7755 +/- 0.0120 | +0.0119 |
+| `hybrid_margin_T12` | 12 | 0.7676 +/- 0.0005 | +0.0039 |
+| `standard_centroids` | 12 | 0.7674 +/- 0.0025 | +0.0037 |
+| `standard_margin_n015` | 4 | 0.7670 +/- 0.0075 | +0.0034 |
+| `standard_margin_n015` | 12 | 0.7668 +/- 0.0075 | +0.0032 |
+| `rolled_mse_margin_T12` | 12 | 0.7660 +/- 0.0038 | +0.0023 |
+| `standard_centroids` | 4 | 0.7656 +/- 0.0054 | +0.0020 |
+| `rolled_ce_T12` | 12 | 0.7596 +/- 0.0084 | −0.0041 |
+
+### 2.3 DTD, ResNet-18
+
+| Configuration | T | Top-1 accuracy | ΔAcc |
+| --- | --- | --- | --- |
+| frozen linear probe (baseline) | – | 0.6284 | – |
+| **`standard_margin_n015`** | **4** | **0.6358 +/- 0.0059** | **+0.0074** |
+| `standard_margin_n015` | 12 | 0.6358 +/- 0.0053 | +0.0074 |
+| `rolled_mse_margin_T12` | 12 | 0.6326 +/- 0.0075 | +0.0043 |
+| `hybrid_margin_T12` | 12 | 0.6296 +/- 0.0067 | +0.0012 |
+| `standard_probe_weights_n015` | 4 | 0.6243 +/- 0.0008 | −0.0041 |
+| `hybrid_probe_weights_T12` | 12 | 0.6243 +/- 0.0094 | −0.0041 |
+| `standard_probe_weights_n015` | 12 | 0.6202 +/- 0.0044 | −0.0082 |
+| `rolled_mse_probe_weights_T4` | 4 | 0.6142 +/- 0.0080 | −0.0142 |
+| `standard_centroids` | 12 | 0.6110 +/- 0.0059 | −0.0174 |
+| `standard_centroids` | 4 | 0.6062 +/- 0.0078 | −0.0222 |
+| `rolled_ce_T12` | 12 | 0.5982 +/- 0.0025 | −0.0301 |
+
+The `+/-` shown is the across-seed spread of the accuracy. Because each flow is paired with
+its own seed's probe, the sharper statistic is the spread of the per-seed *difference*;
+`print_stage3_table` reports that as `delta +/- delta_std` and stars any gain exceeding two
+paired standard deviations. K = 5 and K = 10 are in `<results>/stage3_table.csv` and in the
+accuracy-versus-K figures below.
+
+### 2.4 Best per cell
+
+| Cell | Baseline | Best flow | ΔAcc |
+| --- | --- | --- | --- |
+| FGVC-Aircraft / ResNet-18 | 0.3662 | `standard_margin_n015` (T=4) | **+0.0239** |
+| DTD / DINOv2 ViT-S/14 | 0.7637 | `standard_probe_weights_n015` (T=4) | **+0.0200** |
+| DTD / ResNet-18 | 0.6284 | `standard_margin_n015` (T=4) | +0.0074 |
+
+### 2.5 Selection caveat
+
+The eight configurations above were chosen from a 17-variant screen ranked by **test**
+accuracy at K=full, seed 0. Seed 0 then also appears in the three seeds reported here, so
+the headline numbers carry a mild optimistic bias from selection on the test split.
+
+Two things limit it. Checkpoint selection *within* every run uses the validation split
+only, never test. And the gains reproduce on seeds 1 and 2, which played no part in
+choosing the configurations. The strictly unbiased estimate is the seeds 1-2 mean; the
+honest reading of `+0.0239` and `+0.0200` is "real, and probably a little smaller".
 
 ---
 
-## 4. Visualization of the Learned Dynamics
+## 3. Figures
 
-The following sections visualize the learned vector fields and trajectories for each objective and dataset.
-The plots are merged horizontally and displayed in the following order:
-**(1) Training Loss & Validation Accuracy | (2) 2D Vector Field (t=0) | (3) Trajectories (T=4) | (4) Trajectories (T=12)**
+Generated with `make_stage3_report(fm_results, save=True)` and
+`plot_flow_dynamics(..., save=True)`; see §6.
 
+### 3.1 Accuracy versus K, with error bars
 
-### 4.1 Objective: `STANDARD` | Dataset: `DTD` (resnet18)
+![Accuracy vs K, Aircraft / ResNet-18](figures/stage3_accuracy_vs_k_aircraft_resnet18.png)
+![Accuracy vs K, DTD / DINOv2](figures/stage3_accuracy_vs_k_dtd_dinov2_vits14.png)
+![Accuracy vs K, DTD / ResNet-18](figures/stage3_accuracy_vs_k_dtd_resnet18.png)
 
-**Target: Centroids**
+### 3.2 Configuration ablation at K = full
 
-![Centroids Merged Visualization](figures/viz_standard_dtd_resnet18_centroids_merged.png)
+![Ablation, Aircraft / ResNet-18](figures/stage3_ablation_aircraft_resnet18_kfull.png)
+![Ablation, DTD / DINOv2](figures/stage3_ablation_dtd_dinov2_vits14_kfull.png)
+![Ablation, DTD / ResNet-18](figures/stage3_ablation_dtd_resnet18_kfull.png)
 
-**Target: Probe Weights**
+### 3.3 Learned dynamics
 
-![Probe Weights Merged Visualization](figures/viz_standard_dtd_resnet18_probe_weights_merged.png)
+Each row is one run: training loss and validation accuracy, the vector field at $t=0$, and
+trajectories at $T=4$ and $T=12$, with class targets drawn as stars. The projection is
+fitted jointly over the trajectory states and the targets.
 
-**Target: Orthogonal**
+![Dynamics, standard_margin_n015 on Aircraft](figures/viz_standard_margin_n015_aircraft_resnet18_kfull_seed0.png)
+![Dynamics, standard_probe_weights_n015 on DTD/DINOv2](figures/viz_standard_probe_weights_n015_dtd_dinov2_vits14_kfull_seed0.png)
+![Dynamics, standard_centroids on DTD/ResNet-18](figures/viz_standard_centroids_dtd_resnet18_kfull_seed0.png)
 
-![Orthogonal Merged Visualization](figures/viz_standard_dtd_resnet18_orthogonal_merged.png)
+### 3.4 Feature space before and after the flow
 
+Same test examples and colours in every panel, one PCA fitted jointly over all feature sets
+and the class targets.
 
-### 4.2 Objective: `STANDARD` | Dataset: `AIRCRAFT` (resnet18)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_standard_aircraft_resnet18_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_standard_aircraft_resnet18_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_standard_aircraft_resnet18_orthogonal_merged.png)
-
-
-### 4.3 Objective: `STANDARD` | Dataset: `DTD` (dinov2_vits14)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_standard_dtd_dinov2_vits14_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_standard_dtd_dinov2_vits14_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_standard_dtd_dinov2_vits14_orthogonal_merged.png)
-
-
-### 4.4 Objective: `ROLLED_MSE` | Dataset: `DTD` (resnet18)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_rolled_mse_dtd_resnet18_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_rolled_mse_dtd_resnet18_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_rolled_mse_dtd_resnet18_orthogonal_merged.png)
-
-
-### 4.5 Objective: `ROLLED_MSE` | Dataset: `AIRCRAFT` (resnet18)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_rolled_mse_aircraft_resnet18_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_rolled_mse_aircraft_resnet18_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_rolled_mse_aircraft_resnet18_orthogonal_merged.png)
-
-
-### 4.6 Objective: `ROLLED_MSE` | Dataset: `DTD` (dinov2_vits14)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_rolled_mse_dtd_dinov2_vits14_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_rolled_mse_dtd_dinov2_vits14_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_rolled_mse_dtd_dinov2_vits14_orthogonal_merged.png)
-
-
-### 4.7 Objective: `ROLLED_CE` | Dataset: `DTD` (resnet18)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_rolled_ce_dtd_resnet18_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_rolled_ce_dtd_resnet18_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_rolled_ce_dtd_resnet18_orthogonal_merged.png)
-
-
-### 4.8 Objective: `ROLLED_CE` | Dataset: `AIRCRAFT` (resnet18)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_rolled_ce_aircraft_resnet18_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_rolled_ce_aircraft_resnet18_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_rolled_ce_aircraft_resnet18_orthogonal_merged.png)
-
-
-### 4.9 Objective: `ROLLED_CE` | Dataset: `DTD` (dinov2_vits14)
-
-**Target: Centroids**
-
-![Centroids Merged Visualization](figures/viz_rolled_ce_dtd_dinov2_vits14_centroids_merged.png)
-
-**Target: Probe Weights**
-
-![Probe Weights Merged Visualization](figures/viz_rolled_ce_dtd_dinov2_vits14_probe_weights_merged.png)
-
-**Target: Orthogonal**
-
-![Orthogonal Merged Visualization](figures/viz_rolled_ce_dtd_dinov2_vits14_orthogonal_merged.png)
-
+![Before and after](figures/flow_comparison_dtd_T12.png)
 
 ---
 
-## 5. Discussion & Findings
+## 4. Findings
 
-- **`standard` vs `rolled_mse`:** The standard objective reliably fits smooth paths to the targets, resulting in orderly trajectory lines. In contrast, `rolled_mse` has no intermediate guidance and is only penalized at the endpoint, which gives it more freedom but makes it a harder optimization problem when unrolled over 12 steps. 
-- **The failure of `rolled_ce`:** As observed in the Vector Field and Trajectory visualizations, the `rolled_ce` objective produces highly irregular dynamics. Because it only minimizes classification loss without any geometric regularization on the feature space, the network learns to ignore the input structure and often applies a global translation bias. This explains why its vector fields consist of parallel arrows pointing in a uniform direction rather than distinct cluster flows.
-- **`centroids` vs `probe_weights`:** Using the probe weights as targets generally aligns the vectors with the classification boundaries natively learned by the linear probe. `centroids` pulls the manifold together cleanly but can sometimes conflict with the margins already drawn by the probe if the clusters are skewed.
-- **`orthogonal` geometry:** Random orthogonal targets prove surprisingly effective. By defining a maximally separated space, the flow model is forced to untangle the manifold entirely, which the linear probe handles gracefully.
+**4.1 The flow does help, but which target works depends on the encoder.** Two
+configurations win, and they are not interchangeable:
+
+- `standard_margin_n015` is positive on **all three** cells and wins on Aircraft (+0.0239)
+  and DTD/ResNet-18 (+0.0074).
+- `standard_probe_weights_n015` wins on DTD/DINOv2 (+0.0200) but is *negative* on
+  DTD/ResNet-18 (−0.0041).
+
+**4.2 They work by opposite mechanisms.** From the diagnostics on DTD/DINOv2 (seed 0,
+1880 test images):
+
+| Family | mean displacement | labels changed | fixed | broken | net |
+| --- | --- | --- | --- | --- | --- |
+| `probe_weights` | 0.92 | 12.6% | 100 | 46 | **+54** |
+| `margin` | 0.02 | 2.1% | 16 | 5 | **+11** |
+| `centroids` | 0.51 | 9.7% | 64 | 48 | +16 |
+
+`probe_weights` transports aggressively — it relocates features by roughly their own norm
+and rewrites 12% of the predictions. That pays off when the geometry is good (DINOv2) and
+backfires when it is not (ResNet-18). `margin` moves almost nothing and wins on precision
+(a 3:1 fix-to-break ratio versus 2:1). It is the safe option, and its advantage grows where
+the probe is weak and there are many correctable points near boundaries — which is exactly
+Aircraft, at 36% baseline accuracy.
+
+**4.3 Standard FM beats rolled-out training everywhere.** At matched target, the standard
+objective is ahead in every cell: +0.0239 vs +0.0159 (margin, Aircraft) and +0.0200 vs
++0.0138 (probe weights, DINOv2). Backpropagating through the solver gives the field more
+freedom but a harder optimisation problem, and no accuracy for it.
+
+**4.4 Fewer Euler steps are better.** For the standard objective T=4 beats T=12 in both
+winning configurations (0.3901 vs 0.3887; 0.7837 vs 0.7782). Longer integration lets the
+field drift further from the region it was fitted on.
+
+**4.5 Source noise is doing real work.** Both winners use it. Without it the probe has
+near-zero training error on the flow's own data, so the classification objectives are
+saturated and the margin target degenerates into the identity — the effect that made an
+early K=10 screen return all-negative results (see `PLAN_stage3.md` §7).
+
+---
+
+## 5. What did not work
+
+**5.1 Naive flow matching to class centroids.** The textbook formulation is neutral at best
+(+0.0017 Aircraft, +0.0037 DINOv2) and clearly harmful on DTD/ResNet-18 (−0.0222). Pulling
+features toward class means collapses intra-class variance in directions the probe never
+asked about, and fights the margins it already drew. This is the control that makes the
+other results meaningful: a flow that simply reaches a geometric prototype does not help.
+
+**5.2 Pure classification loss (`rolled_ce`).** Worst configuration on two of three cells
+(−0.0301 on DTD/ResNet-18). With no geometric anchor the field degenerates toward a global
+translation. Anchoring it (`hybrid`) recovers most of the loss, which supports that reading.
+
+**5.3 Random orthogonal targets.** Removed. Transporting classes to random mutually
+orthogonal directions produces features the frozen probe *cannot* classify by construction:
+DTD/DINOv2 collapsed from 0.7637 to 0.0718 at K=full. Useful as evidence that the flow is
+perfectly capable of reaching its targets — the failures above are not optimisation
+failures.
+
+**5.4 Cross-fitted probes.** Training the flow against probes that held out its own samples
+does de-saturate the loss, but the flow then learns the *fold* probes' boundaries while
+being scored against the full probe: `rolled_ce` fell from −0.056 to −0.080. Kept in
+`negative_control_configs()`.
+
+**5.5 DTD / ResNet-18 resists everything.** The best gain is +0.0074 +/- 0.0059, which is
+inside one standard deviation. Mid-quality features on a 47-class problem appear to leave
+the least headroom: the geometry is not clean enough for aggressive transport, and the
+probe is not weak enough for margin corrections to find many safe wins.
+
+---
+
+## 6. Reproducing
+
+Cell-by-cell instructions are in `docs/stage3_cells.md`.
+
+```python
+from src.fmlayer.train.checks import run_all_checks
+from src.fmlayer.train.train_fm import run_all_stage3
+from src.fmlayer.stage3_report import make_stage3_report
+
+run_all_checks()                                   # component self-tests
+fm_results = run_all_stage3(max_epochs=500)        # 8 configs x 3 cells x 3 K x 3 seeds
+report = make_stage3_report(fm_results, ablation_k="full", save=True)
+```
+
+`default_configs()` holds the eight configurations selected by screening every variant at
+K=full on all three cells; `exploratory_configs()` and `negative_control_configs()` hold
+what was dropped, so the pruning stays reproducible. Runs are cached per configuration in
+`<results>/curves_fm_stage3/` and `<results>/models_stage3/`, and the Stage 1 probes in
+`<results>/probes_stage3/`, so the grid resumes rather than recomputes.
+

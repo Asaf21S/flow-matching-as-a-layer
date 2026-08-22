@@ -49,18 +49,23 @@ def stage3_table(results: dict) -> pd.DataFrame:
         raise ValueError("No Stage 3 results to aggregate.")
 
     frame = pd.DataFrame(records)
+    # Each run is paired with the probe of its own seed, so the delta is a paired
+    # difference and its own spread is the right error bar, not the spread of accuracy.
+    frame["run_delta"] = frame["accuracy"] - frame["baseline"]
     table = (
         frame.groupby(list(GROUP_COLUMNS))
         .agg(
             acc_mean=("accuracy", "mean"),
             acc_std=("accuracy", "std"),
             baseline_mean=("baseline", "mean"),
+            delta=("run_delta", "mean"),
+            delta_std=("run_delta", "std"),
             runs=("accuracy", "size"),
         )
         .reset_index()
     )
     table["acc_std"] = table["acc_std"].fillna(0.0)
-    table["delta"] = table["acc_mean"] - table["baseline_mean"]
+    table["delta_std"] = table["delta_std"].fillna(0.0)
 
     table["k_order"] = table["k"].map(K_SORT_ORDER).fillna(len(K_SORT_ORDER))
     table = table.sort_values(["dataset", "encoder", "k_order", "delta"], ascending=[True, True, True, False])
@@ -103,13 +108,17 @@ def print_stage3_table(table: pd.DataFrame, k: int | str | None = None) -> None:
     for (dataset, encoder, size), group in rows.groupby(["dataset", "encoder", "k"], sort=False):
         baseline = float(group["baseline_mean"].mean())
         print(f"\n=== {get_spec(dataset).display_name} | {encoder} | K = {size} ===")
-        print(f"  {'configuration':<40} {'T':>3}  {'accuracy':>17}  {'delta':>8}")
-        print(f"  {'frozen linear probe (baseline)':<40} {'-':>3}  {baseline:>9.4f}          {0.0:>+8.4f}")
+        print(f"  {'configuration':<34} {'T':>3}  {'accuracy':>17}  {'delta (paired)':>20}")
+        print(f"  {'frozen linear probe (baseline)':<34} {'-':>3}  {baseline:>9.4f}          {'-':>20}")
         for _, row in group.sort_values("delta", ascending=False).iterrows():
+            # Flag a gain only when it clears two paired standard deviations.
+            significant = "*" if row["delta"] > 2 * row["delta_std"] else " "
             print(
-                f"  {row['config_name']:<40} {int(row['steps']):>3}  "
-                f"{row['acc_mean']:>9.4f} +/- {row['acc_std']:.4f}  {row['delta']:>+8.4f}"
+                f"  {row['config_name']:<34} {int(row['steps']):>3}  "
+                f"{row['acc_mean']:>9.4f} +/- {row['acc_std']:.4f}  "
+                f"{row['delta']:>+9.4f} +/- {row['delta_std']:.4f} {significant}"
             )
+    print("\n* delta exceeds twice its paired standard deviation across seeds")
 
 
 def target_table_for_run(
