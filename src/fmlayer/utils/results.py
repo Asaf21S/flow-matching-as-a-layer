@@ -12,13 +12,15 @@ RUNS_COLUMNS = (
     "encoder",
     "k",
     "seed",
+    "steps",
     "split",
     "accuracy",
     "num_items",
     "timestamp",
 )
 # A run is uniquely identified by these fields; re-running replaces the old row.
-IDENTITY_COLUMNS = ("method", "dataset", "encoder", "k", "seed", "split")
+# ``steps`` is part of the identity so the T=4 and T=12 rows of one flow coexist.
+IDENTITY_COLUMNS = ("method", "dataset", "encoder", "k", "seed", "steps", "split")
 
 
 def default_results_root() -> Path:
@@ -79,17 +81,18 @@ def record_run(row: dict, results_root: Path | None = None) -> Path:
     entry["timestamp"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     identity = tuple(str(entry[column]) for column in IDENTITY_COLUMNS)
+    # Rows written before a column existed are missing the key entirely.
     kept = [
         existing
         for existing in load_runs(results_root)
-        if tuple(str(existing[column]) for column in IDENTITY_COLUMNS) != identity
+        if tuple(str(existing.get(column, "")) for column in IDENTITY_COLUMNS) != identity
     ]
     kept.append(entry)
 
     path = runs_csv_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=RUNS_COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=RUNS_COLUMNS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(kept)
+        writer.writerows({column: item.get(column, "") for column in RUNS_COLUMNS} for item in kept)
     return path

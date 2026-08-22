@@ -1,262 +1,358 @@
+from pathlib import Path
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch import nn
 from sklearn.decomposition import PCA
+from torch import nn
 
 from src.fmlayer.data.class_names import normalize_class_name
 from src.fmlayer.encoders.base import default_device
+from src.fmlayer.models.flow_ode import rollout
 from src.fmlayer.viz.embeddings import COLORMAP, DEFAULT_NUM_CLASSES, select_classes
 from src.fmlayer.viz.figures import apply_plot_style, save_figure
 
+TRAJECTORY_SEED = 0
 
-def plot_flow_vector_field_2d(
-    fm_layer: nn.Module,
-    features: np.ndarray,
-    labels: np.ndarray,
-    metadata: dict,
-    class_ids: np.ndarray | None = None,
-    t: float = 0.0,
-    grid_res: int = 25,
-    device: torch.device | None = None,
-    figures_root: str | None = None,
-    show: bool = True,
-    save: bool = False,
-) -> None:
-    """Visualize 2D PCA projection of the Flow Matching vector field v_theta(z, t)."""
-    apply_plot_style()
-    device = device if device is not None else default_device()
-    dataset = metadata.get("dataset", "dtd")
-    class_names = metadata.get("class_names", [])
 
-    class_ids = class_ids if class_ids is not None else select_classes(dataset, DEFAULT_NUM_CLASSES)
-    mask = np.isin(labels, class_ids)
-    features_sub = features[mask]
-    labels_sub = labels[mask]
+def class_label(class_names: list[str], class_id: int) -> str:
+    """Readable name of one class, falling back to its index."""
+    if class_id < len(class_names):
+        return normalize_class_name(class_names[class_id])
+    return f"Class {class_id}"
 
-    pca = PCA(n_components=2, random_state=0)
-    features_2d = pca.fit_transform(features_sub)
 
-    x_min, x_max = features_2d[:, 0].min() - 0.5, features_2d[:, 0].max() + 0.5
-    y_min, y_max = features_2d[:, 1].min() - 0.5, features_2d[:, 1].max() + 0.5
-
-    u1 = np.linspace(x_min, x_max, grid_res)
-    u2 = np.linspace(y_min, y_max, grid_res)
-    U1, U2 = np.meshgrid(u1, u2)
-    grid_2d = np.column_stack([U1.ravel(), U2.ravel()])
-
-    grid_high = pca.inverse_transform(grid_2d)
-    grid_tensor = torch.from_numpy(grid_high).float().to(device)
-
-    fm_layer.eval()
+def transported(field: nn.Module, features: np.ndarray, steps: int, device: torch.device) -> np.ndarray:
+    """Run the flow over a feature array and return the transported array."""
+    field.eval()
+    tensor = torch.from_numpy(np.ascontiguousarray(features)).float().to(device)
     with torch.no_grad():
-        v_high = fm_layer(grid_tensor, t).cpu().numpy()
+        final, _ = rollout(field, tensor, steps)
+    return final.cpu().numpy()
 
-    # Project high-dimensional velocity onto PCA principal components
-    v_2d = v_high @ pca.components_.T
-    V1 = v_2d[:, 0].reshape(U1.shape)
-    V2 = v_2d[:, 1].reshape(U2.shape)
 
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    colors = matplotlib.colormaps[COLORMAP]
+def trajectory_states(
+    field: nn.Module, features: np.ndarray, steps: int, device: torch.device
+) -> np.ndarray:
+    """Every intermediate state of the flow, shape ``(steps + 1, num_items, dim)``."""
+    field.eval()
+    tensor = torch.from_numpy(np.ascontiguousarray(features)).float().to(device)
+    with torch.no_grad():
+        _, states = rollout(field, tensor, steps)
+    return states.cpu().numpy()
 
-    for position, class_id in enumerate(class_ids):
-        color = colors(position % colors.N)
-        points = features_2d[labels_sub == class_id]
-        cname = class_names[class_id] if class_id < len(class_names) else f"Class {class_id}"
+
+def sample_per_class(
+    labels: np.ndarray, class_ids: np.ndarray, per_class: int, seed: int = TRAJECTORY_SEED
+) -> np.ndarray:
+    """Pick a few example indices from each requested class."""
+    rng = np.random.default_rng(seed)
+    picked = []
+    for class_id in class_ids:
+        members = np.flatnonzero(labels == class_id)
+        if len(members):
+            picked.extend(rng.choice(members, size=min(per_class, len(members)), replace=False))
+    return np.asarray(picked, dtype=int)
+
+
+def fit_joint_pca(blocks: list[np.ndarray], seed: int = 0) -> PCA:
+    """Fit one PCA over every feature set that will be compared.
+
+    Fitting jointly is what makes the panels of a comparison figure readable against
+    each other and against the class targets.
+    """
+    pca = PCA(n_components=2, random_state=seed)
+    pca.fit(np.concatenate([block for block in blocks if len(block)], axis=0))
+    return pca
+
+
+def draw_targets(ax, target_xy: np.ndarray, class_ids: np.ndarray, colors) -> None:
+    """Overlay the class targets as stars."""
+    for position, _ in enumerate(class_ids):
         ax.scatter(
-            points[:, 0],
-            points[:, 1],
-            s=25,
-            alpha=0.6,
-            color=color,
-            label=normalize_class_name(cname),
+            target_xy[position, 0],
+            target_xy[position, 1],
+            s=260,
+            marker="*",
+            color=colors(position % colors.N),
+            edgecolor="black",
+            linewidth=1.2,
+            zorder=6,
         )
 
-    # Overlay streamplot vector field lines
-    speed = np.sqrt(V1**2 + V2**2)
-    ax.streamplot(
-        u1,
-        u2,
-        V1,
-        V2,
-        color=speed,
-        cmap="autumn",
-        linewidth=1.2,
-        density=1.2,
-        arrowsize=1.2,
-    )
 
-    objective = metadata.get("objective", "standard")
-    target_type = metadata.get("target_type", "centroids")
-    title = f"[{objective} - {target_type}] Vector Field $v_\\theta(z_t, t={t:.1f})$ | {dataset.upper()}"
+def draw_training_curves(ax, history: list[dict], title: str) -> None:
+    """Plot the training loss with the validation accuracy on a twin axis."""
+    epochs = [entry["epoch"] for entry in history]
+    losses = [entry["train_loss"] for entry in history]
+    ax.plot(epochs, losses, color="#1f77b4", linewidth=2, label="train loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Training loss", color="#1f77b4")
+    ax.tick_params(axis="y", labelcolor="#1f77b4")
+    if min(losses) > 0:
+        ax.set_yscale("log")
 
-    ax.set_title(
-        title,
-        pad=10,
-    )
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, framealpha=0.95)
-    fig.tight_layout()
-
-    save_figure(fig, f"flow_vector_field_t{int(t*10)}", figures_root, show=show, save=save)
+    validated = [entry for entry in history if "val_accuracy" in entry]
+    if validated:
+        twin = ax.twinx()
+        twin.plot(
+            [entry["epoch"] for entry in validated],
+            [entry["val_accuracy"] for entry in validated],
+            color="#d62728",
+            linewidth=2,
+            label="val accuracy",
+        )
+        twin.set_ylabel("Val accuracy", color="#d62728")
+        twin.tick_params(axis="y", labelcolor="#d62728")
+        twin.grid(False)
+    ax.set_title(title, pad=8)
 
 
-def plot_flow_trajectories_2d(
-    fm_layer: nn.Module,
+def draw_vector_field(
+    ax,
+    field: nn.Module,
     features: np.ndarray,
     labels: np.ndarray,
-    metadata: dict,
-    class_ids: np.ndarray | None = None,
-    num_steps: int = 12,
-    samples_per_class: int = 2,
+    class_ids: np.ndarray,
+    class_names: list[str],
+    targets: np.ndarray | None = None,
+    t: float = 0.0,
+    grid_res: int = 22,
     device: torch.device | None = None,
-    figures_root: str | None = None,
-    show: bool = True,
-    save: bool = False,
 ) -> None:
-    """Visualize discrete sample ODE flow trajectories z0 -> z1 in 2D PCA space."""
-    apply_plot_style()
+    """Stream-plot the velocity field in the 2D PCA plane of the shown classes."""
     device = device if device is not None else default_device()
-    dataset = metadata.get("dataset", "dtd")
-    class_names = metadata.get("class_names", [])
-
-    class_ids = class_ids if class_ids is not None else select_classes(dataset, DEFAULT_NUM_CLASSES)
-
-    # Select representative samples per class
-    sample_indices = []
-    rng = np.random.default_rng(0)
-    for cid in class_ids:
-        c_idxs = np.where(labels == cid)[0]
-        if len(c_idxs) > 0:
-            sample_indices.extend(rng.choice(c_idxs, size=min(samples_per_class, len(c_idxs)), replace=False))
-
-    sample_features = features[sample_indices]
-    sample_labels = labels[sample_indices]
-
-    # Integrate Euler steps and record trajectory states
-    dt = 1.0 / num_steps
-    z_tensor = torch.from_numpy(sample_features).float().to(device)
-    trajectories = [z_tensor.cpu().numpy()]
-
-    fm_layer.eval()
-    with torch.no_grad():
-        for i in range(num_steps):
-            t = i * dt
-            v = fm_layer(z_tensor, t)
-            z_tensor = z_tensor + v * dt
-            trajectories.append(z_tensor.cpu().numpy())
-
-    all_states = np.concatenate(trajectories, axis=0)
-    pca = PCA(n_components=2, random_state=0)
-    pca.fit(all_states)
-
-    trajectories_2d = np.array([pca.transform(traj) for traj in trajectories])  # (steps+1, num_samples, 2)
-
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
     colors = matplotlib.colormaps[COLORMAP]
 
-    for position, class_id in enumerate(class_ids):
-        color = colors(position % colors.N)
-        sample_mask = sample_labels == class_id
-        cname = class_names[class_id] if class_id < len(class_names) else f"Class {class_id}"
-
-        for idx in np.where(sample_mask)[0]:
-            path = trajectories_2d[:, idx, :]  # (steps+1, 2)
-            # Plot trajectory curve
-            ax.plot(path[:, 0], path[:, 1], color=color, linewidth=1.8, alpha=0.8, marker=".", markersize=4)
-            # Start point (z0)
-            ax.scatter(path[0, 0], path[0, 1], color=color, s=40, marker="o", edgecolors="black", linewidths=0.5)
-            # End point (z1)
-            ax.scatter(path[-1, 0], path[-1, 1], color=color, s=80, marker="^", edgecolors="black", linewidths=1.0)
-
-        # Legend entry
-        ax.scatter([], [], color=color, label=normalize_class_name(cname), s=40)
-
-    objective = metadata.get("objective", "standard")
-    target_type = metadata.get("target_type", "centroids")
-    title = f"[{objective} - {target_type}] ODE Sample Trajectories ($z_0 \\rightarrow z_1$) | {dataset.upper()}"
-
-    ax.set_title(
-        title,
-        pad=10,
-    )
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", frameon=True, framealpha=0.95)
-    fig.tight_layout()
-
-    save_figure(fig, "flow_trajectories_2d", figures_root, show=show, save=save)
-
-
-def plot_before_after_embeddings(
-    fm_layer: nn.Module,
-    features: np.ndarray,
-    labels: np.ndarray,
-    metadata: dict,
-    class_ids: np.ndarray | None = None,
-    device: torch.device | None = None,
-    figures_root: str | None = None,
-    show: bool = True,
-    save: bool = False,
-) -> None:
-    """Side-by-side 2D PCA comparison of raw features z0 vs flow-transformed features z1."""
-    apply_plot_style()
-    device = device if device is not None else default_device()
-    dataset = metadata.get("dataset", "dtd")
-    class_names = metadata.get("class_names", [])
-
-    class_ids = class_ids if class_ids is not None else select_classes(dataset, DEFAULT_NUM_CLASSES)
     mask = np.isin(labels, class_ids)
-    features_sub = features[mask]
-    labels_sub = labels[mask]
+    subset, subset_labels = features[mask], labels[mask]
+    target_subset = targets[class_ids] if targets is not None else np.empty((0, features.shape[1]))
 
-    from src.fmlayer.models.flow_ode import rollout
-    # Transform features with Flow Matching layer
-    z0_tensor = torch.from_numpy(features_sub).float().to(device)
-    fm_layer.eval()
+    pca = fit_joint_pca([subset, target_subset])
+    subset_xy = pca.transform(subset)
+
+    x_min, x_max = subset_xy[:, 0].min() - 0.5, subset_xy[:, 0].max() + 0.5
+    y_min, y_max = subset_xy[:, 1].min() - 0.5, subset_xy[:, 1].max() + 0.5
+    axis_x = np.linspace(x_min, x_max, grid_res)
+    axis_y = np.linspace(y_min, y_max, grid_res)
+    grid_x, grid_y = np.meshgrid(axis_x, axis_y)
+
+    grid_high = pca.inverse_transform(np.column_stack([grid_x.ravel(), grid_y.ravel()]))
+    field.eval()
     with torch.no_grad():
-        z1_tensor, _ = rollout(fm_layer, z0_tensor, 12)
-    z1_sub = z1_tensor.cpu().numpy()
+        velocity = field(torch.from_numpy(grid_high).float().to(device), t).cpu().numpy()
 
-    # Fit PCA jointly on z0 and z1
-    pca = PCA(n_components=2, random_state=0)
-    all_combined = np.concatenate([features_sub, z1_sub], axis=0)
-    pca.fit(all_combined)
+    velocity_2d = velocity @ pca.components_.T
+    component_x = velocity_2d[:, 0].reshape(grid_x.shape)
+    component_y = velocity_2d[:, 1].reshape(grid_y.shape)
 
-    z0_2d = pca.transform(features_sub)
-    z1_2d = pca.transform(z1_sub)
+    for position, class_id in enumerate(class_ids):
+        points = subset_xy[subset_labels == class_id]
+        ax.scatter(
+            points[:, 0], points[:, 1], s=20, alpha=0.55,
+            color=colors(position % colors.N), label=class_label(class_names, class_id),
+        )
+    if targets is not None:
+        draw_targets(ax, pca.transform(target_subset), class_ids, colors)
 
+    ax.streamplot(
+        axis_x, axis_y, component_x, component_y,
+        color=np.sqrt(component_x**2 + component_y**2),
+        cmap="autumn", linewidth=1.1, density=1.1, arrowsize=1.1,
+    )
+    ax.set_title(f"Vector field $v_\\theta(z, t={t:.1f})$", pad=8)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def draw_trajectories(
+    ax,
+    field: nn.Module,
+    features: np.ndarray,
+    labels: np.ndarray,
+    class_ids: np.ndarray,
+    class_names: list[str],
+    targets: np.ndarray | None = None,
+    steps: int = 12,
+    per_class: int = 2,
+    device: torch.device | None = None,
+) -> None:
+    """Draw a few ODE trajectories with their origin, endpoint and class target."""
+    device = device if device is not None else default_device()
     colors = matplotlib.colormaps[COLORMAP]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.5, 4))
+
+    picked = sample_per_class(labels, class_ids, per_class)
+    states = trajectory_states(field, features[picked], steps, device)
+    picked_labels = labels[picked]
+    target_subset = targets[class_ids] if targets is not None else np.empty((0, features.shape[1]))
+
+    # The projection spans the whole trajectory and the targets, so endpoints and
+    # prototypes are comparable in the same plane.
+    pca = fit_joint_pca([states.reshape(-1, states.shape[-1]), target_subset])
+    states_xy = np.stack([pca.transform(state) for state in states])
 
     for position, class_id in enumerate(class_ids):
         color = colors(position % colors.N)
-        cname = class_names[class_id] if class_id < len(class_names) else f"Class {class_id}"
+        for index in np.flatnonzero(picked_labels == class_id):
+            path = states_xy[:, index, :]
+            ax.plot(path[:, 0], path[:, 1], color=color, linewidth=1.6, alpha=0.85, marker=".", markersize=4)
+            ax.scatter(path[0, 0], path[0, 1], color=color, s=42, marker="o", edgecolors="black", linewidths=0.5)
+            ax.scatter(path[-1, 0], path[-1, 1], color=color, s=84, marker="^", edgecolors="black", linewidths=1.0)
+        ax.scatter([], [], color=color, label=class_label(class_names, class_id), s=40)
 
-        p0 = z0_2d[labels_sub == class_id]
-        ax1.scatter(p0[:, 0], p0[:, 1], s=25, alpha=0.6, color=color, label=normalize_class_name(cname))
+    if targets is not None:
+        draw_targets(ax, pca.transform(target_subset), class_ids, colors)
 
-        p1 = z1_2d[labels_sub == class_id]
-        ax2.scatter(p1[:, 0], p1[:, 1], s=25, alpha=0.6, color=color)
+    ax.set_title(f"Trajectories $z_0 \\rightarrow z_T$ (T={steps})", pad=8)
+    ax.set_xticks([])
+    ax.set_yticks([])
 
-    ax1.set_title("Before: Raw Frozen Features ($z_0$)", pad=8)
-    ax1.set_xticks([])
-    ax1.set_yticks([])
 
-    ax2.set_title("After: Flow-Transformed Features ($z_1$)", pad=8)
-    ax2.set_xticks([])
-    ax2.set_yticks([])
+def plot_flow_dynamics(
+    result: dict,
+    features: np.ndarray,
+    labels: np.ndarray,
+    class_names: list[str],
+    targets: np.ndarray | None = None,
+    class_ids: np.ndarray | None = None,
+    step_counts: tuple[int, ...] = (4, 12),
+    num_classes: int = DEFAULT_NUM_CLASSES,
+    device: torch.device | None = None,
+    figures_root: Path | None = None,
+    show: bool = True,
+    save: bool = False,
+) -> Path | None:
+    """Training curves, vector field and trajectories for one run, on a single row.
 
-    handles, legend_labels = ax1.get_legend_handles_labels()
-    fig.legend(handles, legend_labels, loc="center left", bbox_to_anchor=(0.98, 0.5), frameon=True, framealpha=0.95)
-    
-    objective = metadata.get("objective", "standard")
-    target_type = metadata.get("target_type", "centroids")
-    title = f"[{objective} - {target_type}] Representation Refinement | {dataset.upper()}"
-    fig.suptitle(title, fontsize=13, y=1.02)
+    Args:
+        result: One entry returned by :func:`run_stage3`.
+        features: Features to visualise, typically the validation split.
+        labels: Labels matching ``features``.
+        class_names: Class names of the dataset.
+        targets: Optional ``(num_classes, dim)`` target table to overlay as stars.
+        class_ids: Classes to show; defaults to the shared readable subset.
+        step_counts: Trajectory step counts, one panel each.
+        num_classes: Number of classes to show when ``class_ids`` is not given.
+        device: Device to evaluate the field on.
+        figures_root: Output directory.
+        show: Display the figure.
+        save: Write a PNG.
+
+    Returns:
+        Path of the saved figure, or ``None``.
+    """
+    apply_plot_style()
+    dataset = result["dataset"]
+    class_ids = class_ids if class_ids is not None else select_classes(dataset, num_classes)
+    field = result["fm_layer"]
+
+    columns = 2 + len(step_counts)
+    fig, axes = plt.subplots(1, columns, figsize=(5.0 * columns, 4.4))
+
+    draw_training_curves(axes[0], result["history"], "Training loss / val accuracy")
+    draw_vector_field(
+        axes[1], field, features, labels, class_ids, class_names, targets, 0.0, device=device
+    )
+    for offset, steps in enumerate(step_counts):
+        draw_trajectories(
+            axes[2 + offset], field, features, labels, class_ids, class_names,
+            targets, steps, device=device,
+        )
+
+    handles, legend_labels = axes[1].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=True)
+    fig.suptitle(
+        f"[{result['config_name']}]  {dataset.upper()} ({result['encoder']}) "
+        f"K={result['k']} seed={result['seed']}",
+        fontsize=13,
+        y=1.03,
+    )
     fig.tight_layout()
 
-    save_figure(fig, "flow_before_after_pca", figures_root, show=show, save=save)
+    name = (
+        f"viz_{result['config_name']}_{dataset}_{result['encoder']}"
+        f"_k{result['k']}_seed{result['seed']}"
+    )
+    return save_figure(fig, name, figures_root, show=show, save=save)
+
+
+def plot_feature_comparison(
+    fields: dict[str, nn.Module],
+    features: np.ndarray,
+    labels: np.ndarray,
+    class_names: list[str],
+    dataset: str,
+    targets: np.ndarray | None = None,
+    class_ids: np.ndarray | None = None,
+    steps: int = 12,
+    num_classes: int = DEFAULT_NUM_CLASSES,
+    device: torch.device | None = None,
+    figures_root: Path | None = None,
+    show: bool = True,
+    save: bool = False,
+) -> Path | None:
+    """Compare the original features against several transported versions.
+
+    Every panel shares one projection, fitted jointly over all the feature sets and
+    the class targets, which is what the brief asks for.
+
+    Args:
+        fields: Named velocity fields, e.g. ``{"standard FM": ..., "rolled FM": ...}``.
+        features: Features to visualise, typically the test split.
+        labels: Labels matching ``features``.
+        class_names: Class names of the dataset.
+        dataset: Dataset key, used for the title and the class selection.
+        targets: Optional ``(num_classes, dim)`` target table to overlay as stars.
+        class_ids: Classes to show; defaults to the shared readable subset.
+        steps: Euler steps used to transport the features.
+        num_classes: Number of classes to show when ``class_ids`` is not given.
+        device: Device to evaluate the fields on.
+        figures_root: Output directory.
+        show: Display the figure.
+        save: Write a PNG.
+
+    Returns:
+        Path of the saved figure, or ``None``.
+    """
+    apply_plot_style()
+    device = device if device is not None else default_device()
+    class_ids = class_ids if class_ids is not None else select_classes(dataset, num_classes)
+    colors = matplotlib.colormaps[COLORMAP]
+
+    mask = np.isin(labels, class_ids)
+    subset, subset_labels = features[mask], labels[mask]
+    views = {"Original features": subset}
+    for name, field in fields.items():
+        views[name] = transported(field, subset, steps, device)
+
+    target_subset = targets[class_ids] if targets is not None else np.empty((0, features.shape[1]))
+    pca = fit_joint_pca(list(views.values()) + [target_subset])
+    target_xy = pca.transform(target_subset) if targets is not None else None
+
+    fig, axes = plt.subplots(1, len(views), figsize=(4.8 * len(views), 4.4))
+    axes = np.atleast_1d(axes)
+
+    for ax, (name, view) in zip(axes, views.items()):
+        coordinates = pca.transform(view)
+        for position, class_id in enumerate(class_ids):
+            points = coordinates[subset_labels == class_id]
+            ax.scatter(
+                points[:, 0], points[:, 1], s=20, alpha=0.55,
+                color=colors(position % colors.N), label=class_label(class_names, class_id),
+            )
+        if target_xy is not None:
+            draw_targets(ax, target_xy, class_ids, colors)
+        ax.set_title(name, pad=8)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=True)
+    fig.suptitle(
+        f"{dataset.upper()}: feature space before and after the flow (T={steps}, joint PCA)",
+        fontsize=13,
+        y=1.03,
+    )
+    fig.tight_layout()
+    return save_figure(fig, f"flow_comparison_{dataset}_T{steps}", figures_root, show=show, save=save)
