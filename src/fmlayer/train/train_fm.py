@@ -34,8 +34,7 @@ OBJECTIVES = (STANDARD, ROLLED_MSE, ROLLED_CE)
 
 CENTROIDS = "centroids"
 PROBE_WEIGHTS = "probe_weights"
-ORTHOGONAL = "orthogonal"
-TARGET_TYPES = (CENTROIDS, PROBE_WEIGHTS, ORTHOGONAL)
+TARGET_TYPES = (CENTROIDS, PROBE_WEIGHTS)
 
 
 def compute_centroids(features: Tensor, labels: Tensor, num_classes: int, device: torch.device) -> Tensor:
@@ -50,6 +49,24 @@ def compute_centroids(features: Tensor, labels: Tensor, num_classes: int, device
     return centroids
 
 
+def compute_class_stds(features: Tensor, labels: Tensor, num_classes: int, device: torch.device) -> Tensor:
+    embed_dim = features.shape[1]
+    stds = torch.zeros(num_classes, embed_dim, device=device)
+    for c in range(num_classes):
+        mask = labels == c
+        if mask.sum() > 1:
+            stds[c] = features[mask].std(dim=0)
+        else:
+            stds[c] = torch.zeros(embed_dim, device=device)
+            
+    # Replace 0 stds (from classes with 0 or 1 samples) with the mean std of valid classes
+    valid_mask = stds.sum(dim=1) > 0
+    if valid_mask.any():
+        mean_std = stds[valid_mask].mean(dim=0)
+        stds[~valid_mask] = mean_std
+    return stds
+
+
 def compute_targets(
     features: Tensor, labels: Tensor, linear_probe: nn.Module, num_classes: int, target_type: str, device: torch.device
 ) -> Tensor:
@@ -60,12 +77,6 @@ def compute_targets(
         avg_norm = features.norm(p=2, dim=1).mean()
         weights_normalized = torch.nn.functional.normalize(weights, p=2, dim=1)
         return weights_normalized * avg_norm
-    elif target_type == ORTHOGONAL:
-        embed_dim = features.shape[1]
-        avg_norm = features.norm(p=2, dim=1).mean()
-        Q, _ = torch.linalg.qr(torch.randn(embed_dim, embed_dim, device=device))
-        targets = Q[:num_classes]
-        return targets * avg_norm
     else:
         raise ValueError(f"Unknown target_type: {target_type}")
 
@@ -123,6 +134,7 @@ def train_fm_probe(
     device: torch.device,
     objective: str = STANDARD,
     target_type: str = CENTROIDS,
+    target_noise_scale: float = 0.0,
     step_counts: tuple[int, ...] = STEP_COUNTS,
     train_steps: int = 12,
     max_epochs: int = MAX_EPOCHS,
@@ -141,6 +153,7 @@ def train_fm_probe(
     linear_probe.eval()
 
     class_targets = compute_targets(train_features, train_labels, linear_probe, num_classes, target_type, device)
+    class_stds = compute_class_stds(train_features, train_labels, num_classes, device)
     
     from src.fmlayer.models.flow_matching_mlp import build_velocity_field, build_path
     fm_layer = build_velocity_field(embed_dim=embed_dim, seed=seed, device=device)
@@ -171,6 +184,12 @@ def train_fm_probe(
             
             source = train_features[batch]
             target = class_targets[train_labels[batch]]
+            
+            if target_noise_scale > 0:
+                batch_stds = class_stds[train_labels[batch]]
+                noise = torch.randn_like(target) * batch_stds * target_noise_scale
+                target = target + noise
+
             labels = train_labels[batch]
             
             loss = batch_loss(
@@ -215,6 +234,7 @@ def run_stage3(
     seed: int,
     objective: str = STANDARD,
     target_type: str = CENTROIDS,
+    target_noise_scale: float = 0.0,
     step_counts: tuple[int, ...] = STEP_COUNTS,
     train_steps: int = 12,
     feature_root: Path | None = None,
@@ -239,7 +259,7 @@ def run_stage3(
     val_x, val_y = to_tensors(val_features, val_labels, device)
     test_x, test_y = to_tensors(test_features, test_labels, device)
 
-    tag = f"{METHOD}_{objective}_{target_type}_{encoder}_{dataset}_k{k}_seed{seed}"
+    tag = f"{METHOD}_{objective}_{target_type}_noise{target_noise_scale}_{encoder}_{dataset}_k{k}_seed{seed}"
     root = Path(results_root) if results_root is not None else default_results_root()
     path = root / CURVES_DIRNAME / f"{tag}.json"
     model_path = root / "models_stage3" / f"{tag}.pt"
@@ -272,7 +292,7 @@ def run_stage3(
         loaded = False
         fm_layer, linear_probe, history, best_epoch = train_fm_probe(
             train_x, train_y, val_x, val_y, num_classes, seed, device, 
-            objective=objective, target_type=target_type, step_counts=step_counts, train_steps=train_steps, max_epochs=max_epochs
+            objective=objective, target_type=target_type, target_noise_scale=target_noise_scale, step_counts=step_counts, train_steps=train_steps, max_epochs=max_epochs
         )
 
         criterion = nn.CrossEntropyLoss()
@@ -296,6 +316,7 @@ def run_stage3(
             "seed": seed,
             "objective": objective,
             "target_type": target_type,
+            "target_noise_scale": target_noise_scale,
             "num_train": len(indices),
             "best_epoch": best_epoch,
             "baseline_accuracy": baseline_accuracy,
@@ -346,6 +367,7 @@ def run_stage3(
         "seed": seed,
         "objective": objective,
         "target_type": target_type,
+        "target_noise_scale": target_noise_scale,
         "fm_layer": fm_layer, 
         "classifier": linear_probe,
         "baseline_accuracy": baseline_accuracy,
@@ -356,12 +378,15 @@ def run_stage3(
         "history": history,
     }
 
+NOISE_SCALES = (0.0, 1.0)
+
 def run_all_stage3(
     cells: tuple[tuple[str, str], ...] | None = None,
     k_values: tuple[int | str, ...] = K_VALUES,
     seeds: tuple[int, ...] = SEEDS,
     objectives: tuple[str, ...] = OBJECTIVES,
     target_types: tuple[str, ...] = TARGET_TYPES,
+    noise_scales: tuple[float, ...] = NOISE_SCALES,
     step_counts: tuple[int, ...] = STEP_COUNTS,
     feature_root: Path | None = None,
     subset_root: Path | None = None,
@@ -375,16 +400,17 @@ def run_all_stage3(
     print(f"Device: {device}")
 
     jobs = [
-        (encoder, dataset, k, seed, objective, target_type)
+        (encoder, dataset, k, seed, objective, target_type, target_noise_scale)
         for encoder, dataset in cells
         for k in k_values
         for seed in seeds
         for objective in objectives
         for target_type in target_types
+        for target_noise_scale in noise_scales
     ]
 
     results = {}
-    for encoder, dataset, k, seed, objective, target_type in tqdm(jobs, desc="stage 3 grid"):
+    for encoder, dataset, k, seed, objective, target_type, target_noise_scale in tqdm(jobs, desc="stage 3 grid"):
         result = run_stage3(
             encoder,
             dataset,
@@ -392,6 +418,7 @@ def run_all_stage3(
             seed,
             objective=objective,
             target_type=target_type,
+            target_noise_scale=target_noise_scale,
             step_counts=step_counts,
             feature_root=feature_root,
             subset_root=subset_root,
@@ -400,7 +427,7 @@ def run_all_stage3(
             max_epochs=max_epochs,
             record=record,
         )
-        key = f"{objective}/{target_type}/{encoder}/{dataset}/{k}/{seed}"
+        key = f"{objective}/{target_type}/noise{target_noise_scale}/{encoder}/{dataset}/{k}/{seed}"
         results[key] = result
 
     print(f"\n{len(results)} Stage 3 FM runs complete.")
