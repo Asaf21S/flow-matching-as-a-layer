@@ -139,8 +139,12 @@ def proposed_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowCo
     """Variants added to try to beat the frozen-probe baseline.
 
     The margin target only moves points the probe gets wrong, the hybrid objective
-    anchors the classification loss geometrically, and the noise and cross-fitting
-    variants stop the rolled classification loss from starting out already saturated.
+    anchors the classification loss geometrically, and the noise variants stop the
+    rolled classification loss from starting out already saturated.
+
+    Screening on DTD / ResNet-18 / K=10 put every one of these below the baseline, in an
+    order that tracked how far each moved its features. Noise helped; cross-fitting hurt
+    and now lives in :func:`negative_control_configs`. See ``docs/PLAN_stage3.md`` §8.
     """
     longest = max(step_counts)
     configs = [FlowConfig(STANDARD, MARGIN)]
@@ -149,11 +153,26 @@ def proposed_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowCo
     configs += [
         FlowConfig(HYBRID, PROBE_WEIGHTS, longest),
         FlowConfig(STANDARD, MARGIN, noise_std=0.15),
-        FlowConfig(ROLLED_CE, NO_TARGET, longest, noise_std=0.15, cross_fit_folds=3),
-        FlowConfig(HYBRID, MARGIN, longest, noise_std=0.15, cross_fit_folds=3),
+        FlowConfig(STANDARD, PROBE_WEIGHTS, noise_std=0.15),
         FlowConfig(ROLLED_MSE, PROBE_WEIGHTS, longest, noise_std=0.15, mixup_alpha=0.3),
     ]
     return tuple(configs)
+
+
+def negative_control_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
+    """Configurations kept as documented evidence rather than as candidates.
+
+    Cross-fitting was meant to de-saturate the rolled classification loss. It does, but
+    the flow then learns the fold probes' boundaries while being scored against the full
+    probe, so the corrections are aimed at the wrong decision surface: ``rolled_ce`` fell
+    from -0.056 to -0.080. Excluded from :func:`default_configs` so the grid does not
+    spend compute on them; run explicitly to reproduce the finding.
+    """
+    longest = max(step_counts)
+    return (
+        FlowConfig(ROLLED_CE, NO_TARGET, longest, noise_std=0.15, cross_fit_folds=3),
+        FlowConfig(HYBRID, MARGIN, longest, noise_std=0.15, cross_fit_folds=3),
+    )
 
 
 def default_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
@@ -652,14 +671,19 @@ def run_all_stage3(
 
 
 def screen_configs(
-    encoder: str = "resnet18",
+    encoder: str = "dinov2_vits14",
     dataset: str = "dtd",
-    k: int | str = 10,
+    k: int | str = "full",
     seed: int = 0,
     configs: tuple[FlowConfig, ...] | None = None,
     **kwargs,
 ) -> dict:
-    """Run every configuration on one cheap cell, to decide what deserves the full grid.
+    """Run every configuration on a single cell, to decide what deserves the full grid.
+
+    The default cell is the one where the flow has the best chance: the strongest encoder
+    and the most training data. Screening on a weak encoder at low K is misleading,
+    because the probe then has zero training error, which collapses the margin target
+    into the identity and leaves the classification objectives with no gradient.
 
     Args:
         encoder: Encoder key.

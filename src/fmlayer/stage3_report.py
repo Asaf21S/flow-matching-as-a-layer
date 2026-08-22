@@ -9,6 +9,7 @@ from src.fmlayer.data.specs import DATASET_SPECS, get_spec
 from src.fmlayer.encoders.registry import LINEAR_PROBE_CELLS
 from src.fmlayer.models.probe_bank import ProbeBank
 from src.fmlayer.models.targets import ClassTargets, build_target_provider
+from src.fmlayer.train.diagnostics import diagnose_all, print_diagnostics
 from src.fmlayer.train.train_linear import to_tensors
 from src.fmlayer.utils.results import default_results_root
 from src.fmlayer.viz.stage3_charts import plot_accuracy_vs_k, plot_config_ablation
@@ -155,24 +156,28 @@ def make_stage3_report(
     results: dict,
     cells: tuple[tuple[str, str], ...] | None = None,
     ablation_k: int | str = K_FULL,
+    feature_root: Path | None = None,
     results_root: Path | None = None,
     figures_root: Path | None = None,
     show: bool = True,
     save: bool = False,
+    diagnose: bool = True,
 ) -> dict:
-    """Build the Stage 3 table, leaderboard and per-cell figures.
+    """Build the Stage 3 table, leaderboard, diagnostics and per-cell figures.
 
     Args:
         results: Output of :func:`run_all_stage3`.
         cells: ``(encoder, dataset)`` pairs; defaults to the Stage 1 probe cells.
         ablation_k: Training-set size charted in the ablation bars.
+        feature_root: Feature cache directory, used by the diagnostics.
         results_root: Results directory.
         figures_root: Figure directory.
         show: Display the figures.
         save: Write PNGs.
+        diagnose: Also measure displacement and label flips per run.
 
     Returns:
-        The table, its path and the paths of every generated figure.
+        The table, its path, the leaderboard, the diagnostics and the figure paths.
     """
     cells = cells if cells is not None else LINEAR_PROBE_CELLS
     table = stage3_table(results)
@@ -180,6 +185,12 @@ def make_stage3_report(
 
     print_stage3_table(table, k=ablation_k)
     print(f"\nStage 3 table -> {table_path}")
+
+    diagnostics = None
+    if diagnose:
+        diagnostics = diagnose_all(results, feature_root=feature_root)
+        print()
+        print_diagnostics(diagnostics)
 
     ablation_figures = []
     accuracy_figures = []
@@ -197,6 +208,7 @@ def make_stage3_report(
         "table": table,
         "table_path": table_path,
         "leaderboard": leaderboard(table, ablation_k),
+        "diagnostics": diagnostics,
         "ablation_figures": ablation_figures,
         "accuracy_figures": accuracy_figures,
     }
