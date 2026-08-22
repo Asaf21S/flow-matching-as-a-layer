@@ -7,11 +7,13 @@ import torch
 from src.fmlayer.data.fewshot import K_FULL, load_train_subset
 from src.fmlayer.data.specs import DATASET_SPECS, get_spec
 from src.fmlayer.encoders.registry import LINEAR_PROBE_CELLS
+from src.fmlayer.features.cache import load_split
 from src.fmlayer.models.probe_bank import ProbeBank
 from src.fmlayer.models.targets import ClassTargets, build_target_provider
 from src.fmlayer.train.diagnostics import diagnose_all, print_diagnostics
 from src.fmlayer.train.train_linear import to_tensors
 from src.fmlayer.utils.results import default_results_root
+from src.fmlayer.viz.flow_viz import plot_feature_comparison, plot_flow_dynamics
 from src.fmlayer.viz.stage3_charts import plot_accuracy_vs_k, plot_config_ablation
 
 TABLE_FILENAME = "stage3_table.csv"
@@ -159,6 +161,89 @@ def target_table_for_run(
         return None
     with torch.no_grad():
         return provider.table.cpu().numpy()
+
+
+def make_stage3_figures(
+    results: dict,
+    k: int | str = K_FULL,
+    seed: int = 0,
+    controls: tuple[str, ...] = ("standard_centroids",),
+    steps: int = 12,
+    feature_root: Path | None = None,
+    figures_root: Path | None = None,
+    show: bool = False,
+    save: bool = True,
+) -> dict:
+    """Render the per-run figures that :func:`make_stage3_report` does not produce.
+
+    For every encoder/dataset cell this draws the learned dynamics of the best
+    configuration and of each control, then one before/after comparison putting those
+    two side by side against the untransported features.
+
+    Args:
+        results: Output of :func:`run_all_stage3`.
+        k: Training-set size to visualise.
+        seed: Seed to visualise.
+        controls: Configurations always drawn alongside the winner, for contrast.
+        steps: Euler steps used in the before/after comparison.
+        feature_root: Feature cache directory.
+        figures_root: Figure directory; defaults to ``<results>/figures``.
+        show: Display the figures.
+        save: Write PNGs.
+
+    Returns:
+        The chosen configuration per cell and the paths of every figure written.
+    """
+    table = stage3_table(results)
+    at_k = table[table["k"].astype(str) == str(k)]
+    dynamics_paths = []
+    comparison_paths = []
+    chosen: dict[str, list[str]] = {}
+
+    for (dataset, encoder), group in at_k.groupby(["dataset", "encoder"]):
+        best = group.sort_values("delta", ascending=False).iloc[0]["config_name"]
+        names = [best] + [name for name in controls if name != best]
+        chosen[f"{encoder}/{dataset}"] = names
+
+        val_features, val_labels, metadata = load_split(encoder, dataset, "val", feature_root)
+        class_names = metadata["class_names"]
+
+        fields = {}
+        for name in names:
+            result = results.get(f"{name}/{encoder}/{dataset}/{k}/{seed}")
+            if result is None:
+                continue
+            targets = target_table_for_run(result, feature_root)
+            dynamics_paths.append(
+                plot_flow_dynamics(
+                    result, val_features, val_labels, class_names, targets=targets,
+                    figures_root=figures_root, show=show, save=save,
+                )
+            )
+            fields[f"After {name}"] = result["fm_layer"]
+
+        if not fields:
+            continue
+
+        test_features, test_labels, _ = load_split(encoder, dataset, "test", feature_root)
+        reference = results[f"{names[0]}/{encoder}/{dataset}/{k}/{seed}"]
+        comparison_paths.append(
+            plot_feature_comparison(
+                fields, test_features, test_labels, class_names, dataset, encoder,
+                targets=target_table_for_run(reference, feature_root), steps=steps,
+                figures_root=figures_root, show=show, save=save,
+            )
+        )
+
+    written = [path for path in dynamics_paths + comparison_paths if path is not None]
+    print(f"\n{len(written)} figure(s) written:")
+    for path in written:
+        print(f"  {path}")
+    return {
+        "chosen": chosen,
+        "dynamics_figures": dynamics_paths,
+        "comparison_figures": comparison_paths,
+    }
 
 
 def make_stage3_report(

@@ -283,6 +283,7 @@ def plot_feature_comparison(
     labels: np.ndarray,
     class_names: list[str],
     dataset: str,
+    encoder: str = "",
     targets: np.ndarray | None = None,
     class_ids: np.ndarray | None = None,
     steps: int = 12,
@@ -295,7 +296,7 @@ def plot_feature_comparison(
     """Compare the original features against several transported versions.
 
     Every panel shares one projection, fitted jointly over all the feature sets and
-    the class targets, which is what the brief asks for.
+    the class targets, so the same point is comparable across panels.
 
     Args:
         fields: Named velocity fields, e.g. ``{"standard FM": ..., "rolled FM": ...}``.
@@ -303,6 +304,7 @@ def plot_feature_comparison(
         labels: Labels matching ``features``.
         class_names: Class names of the dataset.
         dataset: Dataset key, used for the title and the class selection.
+        encoder: Encoder key, kept in the figure name so cells cannot overwrite each other.
         targets: Optional ``(num_classes, dim)`` target table to overlay as stars.
         class_ids: Classes to show; defaults to the shared readable subset.
         steps: Euler steps used to transport the features.
@@ -350,9 +352,13 @@ def plot_feature_comparison(
     handles, legend_labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, legend_labels, loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=True)
     fig.suptitle(
-        f"{dataset.upper()}: feature space before and after the flow (T={steps}, joint PCA)",
+        f"{dataset.upper()}{f' ({encoder})' if encoder else ''}: feature space before and "
+        f"after the flow (T={steps}, joint PCA)",
         fontsize=13,
         y=1.03,
     )
     fig.tight_layout()
-    return save_figure(fig, f"flow_comparison_{dataset}_T{steps}", figures_root, show=show, save=save)
+    suffix = f"_{encoder}" if encoder else ""
+    return save_figure(
+        fig, f"flow_comparison_{dataset}{suffix}_T{steps}", figures_root, show=show, save=save
+    )

@@ -157,8 +157,9 @@ honest reading of `+0.0239` and `+0.0200` is "real, and probably a little smalle
 
 ## 3. Figures
 
-Generated with `make_stage3_report(fm_results, save=True)` and
-`plot_flow_dynamics(..., save=True)`; see §6.
+All fifteen are produced by the two calls in §6: `make_stage3_report(..., save=True)`
+writes the six charts, `make_stage3_figures(...)` writes the nine per-run figures. Both
+land in `<results>/figures/`; copy them into `docs/figures/` for this write-up.
 
 ### 3.1 Accuracy versus K, with error bars
 
@@ -176,18 +177,33 @@ Generated with `make_stage3_report(fm_results, save=True)` and
 
 Each row is one run: training loss and validation accuracy, the vector field at $t=0$, and
 trajectories at $T=4$ and $T=12$, with class targets drawn as stars. The projection is
-fitted jointly over the trajectory states and the targets.
+fitted jointly over the trajectory states and the targets. Winner first, then the
+`centroids` control for the same cell.
 
-![Dynamics, standard_margin_n015 on Aircraft](figures/viz_standard_margin_n015_aircraft_resnet18_kfull_seed0.png)
-![Dynamics, standard_probe_weights_n015 on DTD/DINOv2](figures/viz_standard_probe_weights_n015_dtd_dinov2_vits14_kfull_seed0.png)
-![Dynamics, standard_centroids on DTD/ResNet-18](figures/viz_standard_centroids_dtd_resnet18_kfull_seed0.png)
+**FGVC-Aircraft / ResNet-18**
+
+![Dynamics, standard_margin_n015](figures/viz_standard_margin_n015_aircraft_resnet18_kfull_seed0.png)
+![Dynamics, standard_centroids](figures/viz_standard_centroids_aircraft_resnet18_kfull_seed0.png)
+
+**DTD / DINOv2 ViT-S/14**
+
+![Dynamics, standard_probe_weights_n015](figures/viz_standard_probe_weights_n015_dtd_dinov2_vits14_kfull_seed0.png)
+![Dynamics, standard_centroids](figures/viz_standard_centroids_dtd_dinov2_vits14_kfull_seed0.png)
+
+**DTD / ResNet-18**
+
+![Dynamics, standard_margin_n015](figures/viz_standard_margin_n015_dtd_resnet18_kfull_seed0.png)
+![Dynamics, standard_centroids](figures/viz_standard_centroids_dtd_resnet18_kfull_seed0.png)
 
 ### 3.4 Feature space before and after the flow
 
 Same test examples and colours in every panel, one PCA fitted jointly over all feature sets
-and the class targets.
+and the class targets. Left to right: original features, after the winning flow, after the
+`centroids` control.
 
-![Before and after](figures/flow_comparison_dtd_T12.png)
+![Before and after, Aircraft / ResNet-18](figures/flow_comparison_aircraft_resnet18_T12.png)
+![Before and after, DTD / DINOv2](figures/flow_comparison_dtd_dinov2_vits14_T12.png)
+![Before and after, DTD / ResNet-18](figures/flow_comparison_dtd_resnet18_T12.png)
 
 ---
 
@@ -270,11 +286,13 @@ Cell-by-cell instructions are in `docs/stage3_cells.md`.
 ```python
 from src.fmlayer.train.checks import run_all_checks
 from src.fmlayer.train.train_fm import run_all_stage3
-from src.fmlayer.stage3_report import make_stage3_report
+from src.fmlayer.stage3_report import make_stage3_report, make_stage3_figures
 
 run_all_checks()                                   # component self-tests
 fm_results = run_all_stage3(max_epochs=500)        # 8 configs x 3 cells x 3 K x 3 seeds
-report = make_stage3_report(fm_results, ablation_k="full", save=True)
+
+make_stage3_report(fm_results, ablation_k="full", save=True)   # tables + 6 charts
+make_stage3_figures(fm_results, k="full", seed=0)              # 9 per-run figures
 ```
 
 `default_configs()` holds the eight configurations selected by screening every variant at
