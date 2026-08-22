@@ -88,6 +88,47 @@ def get_probe(
     return _PROBE_CACHE[key]
 
 
+def load_cached_probe(
+    encoder: str,
+    dataset: str,
+    k: int | str,
+    seed: int,
+    embed_dim: int,
+    num_classes: int,
+    device: torch.device,
+    results_root: Path | None = None,
+) -> nn.Linear | None:
+    """Load a probe from the disk cache without touching the features.
+
+    Used when rebuilding results from checkpoints, where the training data is not needed.
+
+    Args:
+        encoder: Encoder key.
+        dataset: Dataset key.
+        k: Shots per class, or ``"full"``.
+        seed: Run seed.
+        embed_dim: Feature dimension.
+        num_classes: Number of classes.
+        device: Device to load onto.
+        results_root: Results directory holding the probe cache.
+
+    Returns:
+        The frozen probe, or ``None`` when it has not been cached yet.
+    """
+    key = (encoder, dataset, str(k), seed, str(device))
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+
+    path = probe_path(encoder, dataset, k, seed, "", results_root)
+    if not path.is_file():
+        return None
+
+    probe = build_linear_probe(embed_dim, num_classes, seed, device)
+    probe.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+    _PROBE_CACHE[key] = freeze(probe)
+    return _PROBE_CACHE[key]
+
+
 def assign_folds(labels: Tensor, num_folds: int, seed: int) -> Tensor:
     """Split samples into class-stratified folds.
 

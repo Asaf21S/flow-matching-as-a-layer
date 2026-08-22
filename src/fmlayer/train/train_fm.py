@@ -28,7 +28,7 @@ from src.fmlayer.models.velocity_field import (
     feature_statistics,
     sample_paths,
 )
-from src.fmlayer.train.probes import get_probe, get_probe_bank
+from src.fmlayer.train.probes import get_probe, get_probe_bank, load_cached_probe
 from src.fmlayer.train.train_linear import to_tensors
 from src.fmlayer.utils.results import default_results_root, record_run
 from src.fmlayer.utils.seeding import set_seed
@@ -680,6 +680,138 @@ def run_all_stage3(
         )
 
     print(f"\n{len(results)} Stage 3 FM runs complete.")
+    return results
+
+
+def stage3_cache_summary(results_root: Path | None = None) -> dict:
+    """Report where the Stage 3 cache resolves to and how much of it is present.
+
+    Run this first after a session restart: if the counts are zero, the results root is
+    pointing somewhere other than the drive the runs were written to.
+
+    Args:
+        results_root: Results directory; defaults to the resolved results root.
+
+    Returns:
+        The resolved root and the number of files in each cache directory.
+    """
+    root = Path(results_root) if results_root is not None else default_results_root()
+    counts = {
+        name: len(list((root / name).glob("*"))) if (root / name).is_dir() else 0
+        for name in (CURVES_DIRNAME, MODELS_DIRNAME, "probes_stage3")
+    }
+    print(f"results root -> {root}")
+    print(f"  exists: {root.is_dir()}")
+    for name, count in counts.items():
+        print(f"  {name:<22} {count}")
+    if not any(counts.values()):
+        print(
+            "\nNothing cached here. Set FMLAYER_RESULTS_ROOT to the drive folder the grid\n"
+            "was written to, or pass results_root= explicitly."
+        )
+    return {"root": root, "counts": counts}
+
+
+def load_stage3_results(
+    cells: tuple[tuple[str, str], ...] | None = None,
+    k_values: tuple[int | str, ...] = K_VALUES,
+    seeds: tuple[int, ...] = SEEDS,
+    configs: tuple[FlowConfig, ...] | None = None,
+    step_counts: tuple[int, ...] = STEP_COUNTS,
+    results_root: Path | None = None,
+    device: torch.device | None = None,
+    verbose: bool = True,
+) -> dict:
+    """Rebuild a result grid from cached checkpoints, without training or evaluating.
+
+    Reads only the per-run JSON and checkpoint plus the cached probes, so it does not
+    touch the feature splits and never rewrites ``runs.csv``. Runs that are not on disk
+    are skipped rather than trained. Use it to redraw figures after a session restart.
+
+    Args:
+        cells: ``(encoder, dataset)`` pairs; defaults to the Stage 1 probe cells.
+        k_values: Training-set sizes to load.
+        seeds: Seeds to load.
+        configs: Flow configurations; defaults to :func:`default_configs`.
+        step_counts: Step counts a standard-objective field was evaluated at.
+        results_root: Results directory.
+        device: Device to load onto; defaults to CUDA when available.
+        verbose: Print a summary of what was found and what was missing.
+
+    Returns:
+        The same structure as :func:`run_all_stage3`, restricted to what is cached.
+    """
+    cells = cells if cells is not None else LINEAR_PROBE_CELLS
+    configs = configs if configs is not None else default_configs(step_counts)
+    device = device if device is not None else default_device()
+    root = Path(results_root) if results_root is not None else default_results_root()
+
+    results = {}
+    missing = []
+
+    for config in configs:
+        for encoder, dataset in cells:
+            for k in k_values:
+                for seed in seeds:
+                    tag = stage3_tag(encoder, dataset, k, seed, config)
+                    curves_path = root / CURVES_DIRNAME / f"{tag}.json"
+                    model_path = root / MODELS_DIRNAME / f"{tag}.pt"
+                    if not (curves_path.is_file() and model_path.is_file()):
+                        missing.append(tag)
+                        continue
+
+                    payload = json.loads(curves_path.read_text(encoding="utf-8"))
+                    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+                    best_states = {int(key): value for key, value in checkpoint["best_states"].items()}
+
+                    # The checkpoint carries the standardisation buffers, so the field can
+                    # be rebuilt without re-reading the training features.
+                    largest = max(best_states)
+                    embed_dim = best_states[largest]["feature_mean"].numel()
+                    field = build_velocity_field(embed_dim=embed_dim, seed=seed, device=device)
+                    field.load_state_dict(best_states[largest])
+                    field.eval()
+
+                    probe = load_cached_probe(
+                        encoder, dataset, k, seed, embed_dim,
+                        get_spec(dataset).num_classes, device, results_root,
+                    )
+                    if probe is None:
+                        missing.append(f"{tag} (probe)")
+                        continue
+
+                    accuracies = {int(key): value for key, value in payload["accuracy_by_steps"].items()}
+                    baseline_accuracy = payload["baseline_accuracy"]
+                    results[f"{config.name}/{encoder}/{dataset}/{k}/{seed}"] = {
+                        "encoder": encoder,
+                        "dataset": dataset,
+                        "k": k,
+                        "seed": seed,
+                        "config": config,
+                        "config_name": config.name,
+                        "objective": config.objective,
+                        "target_type": config.resolved_target(),
+                        "train_steps": config.train_steps,
+                        "fm_layer": field,
+                        "classifier": probe,
+                        "baseline_accuracy": baseline_accuracy,
+                        "accuracy_by_steps": accuracies,
+                        "delta_by_steps": {
+                            steps: value - baseline_accuracy for steps, value in accuracies.items()
+                        },
+                        "best_epoch": {int(key): value for key, value in payload["best_epoch"].items()},
+                        "num_train": payload["num_train"],
+                        "history": payload["history"],
+                    }
+
+    if verbose:
+        print(f"Loaded {len(results)} cached Stage 3 run(s) from {root}")
+        if missing:
+            print(f"{len(missing)} not cached, skipped. First few:")
+            for tag in missing[:5]:
+                print(f"  {tag}")
+        if not results:
+            stage3_cache_summary(results_root)
     return results
 
 
