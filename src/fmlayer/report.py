@@ -10,7 +10,9 @@ from src.fmlayer.viz.curves import plot_representative_curves
 from src.fmlayer.viz.embeddings import plot_embeddings_for_dataset
 
 TABLE_FILENAME = "accuracy_table.csv"
-GROUP_COLUMNS = ("method", "dataset", "encoder", "k")
+# ``steps`` is blank for Stage 1 rows and carries T for the flow rows, so the two
+# inference budgets of one flow never get averaged together.
+GROUP_COLUMNS = ("method", "dataset", "encoder", "k", "steps")
 # Training-set size is a protocol order, not an alphabetical one.
 K_SORT_ORDER = {"5": 0, "10": 1, "full": 2, "none": 3}
 
@@ -31,6 +33,11 @@ def accuracy_table(results_root: Path | None = None) -> pd.DataFrame:
 
     frame = pd.DataFrame(runs)
     frame["accuracy"] = frame["accuracy"].astype(float)
+    # A runs.csv written before the column existed has no ``steps`` at all.
+    for column in GROUP_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+        frame[column] = frame[column].fillna("")
 
     table = (
         frame.groupby(list(GROUP_COLUMNS))["accuracy"]

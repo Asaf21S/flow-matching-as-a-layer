@@ -1,1 +1,2 @@
 open_clip_torch>=2.32      # CLIP RN50 image + text towers (zero-shot branch)
+flow_matching>=1.0         # AffineProbPath + CondOTScheduler (Stage 2/3 flow layer)
