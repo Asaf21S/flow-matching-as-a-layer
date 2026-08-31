@@ -2,7 +2,7 @@ import torch
 from torch import Tensor, nn
 
 
-class ProbeBank:
+class ProbeBank(nn.Module):
     """A stack of frozen linear probes addressed per sample by a fold id.
 
     With one probe the bank behaves exactly like that probe. With several it lets a
@@ -10,9 +10,16 @@ class ProbeBank:
     classification objectives a loss that is not already saturated.
     """
 
-    def __init__(self, probes: list[nn.Linear]):
-        self.weight = torch.stack([probe.weight.detach() for probe in probes])
-        self.bias = torch.stack([probe.bias.detach() for probe in probes])
+    def __init__(self, probes: list[nn.Linear], trainable: bool = False):
+        super().__init__()
+        weight = torch.stack([probe.weight.detach().clone() for probe in probes])
+        bias = torch.stack([probe.bias.detach().clone() for probe in probes])
+        if trainable:
+            self.weight = nn.Parameter(weight)
+            self.bias = nn.Parameter(bias)
+        else:
+            self.register_buffer("weight", weight)
+            self.register_buffer("bias", bias)
 
     @property
     def num_folds(self) -> int:

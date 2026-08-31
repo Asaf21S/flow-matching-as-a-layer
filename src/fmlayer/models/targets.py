@@ -6,8 +6,9 @@ from src.fmlayer.models.probe_bank import ProbeBank
 CENTROIDS = "centroids"
 PROBE_WEIGHTS = "probe_weights"
 MARGIN = "margin"
+GUIDED = "guided"
 NO_TARGET = "none"
-TARGET_TYPES = (CENTROIDS, PROBE_WEIGHTS, MARGIN)
+TARGET_TYPES = (CENTROIDS, PROBE_WEIGHTS, MARGIN, GUIDED)
 
 # Distance the margin target pushes a point past the decision boundary, as a
 # fraction of the mean feature norm.
@@ -119,4 +120,6 @@ def build_target_provider(
     if target_type == MARGIN:
         distance = margin_ratio * features.norm(p=2, dim=1).mean().item()
         return MarginTargets(bank, distance)
+    if target_type == GUIDED:
+        return None
     raise ValueError(f"Unknown target_type {target_type!r}. Available: {sorted(TARGET_TYPES)}")

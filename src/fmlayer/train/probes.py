@@ -162,6 +162,7 @@ def get_probe_bank(
     device: torch.device,
     num_folds: int,
     results_root: Path | None = None,
+    trainable: bool = False,
 ) -> tuple[ProbeBank, Tensor | None]:
     """Build the probe bank the flow trains against.
 
@@ -191,7 +192,7 @@ def get_probe_bank(
         val_features, val_labels, num_classes, device, results_root,
     )
     if num_folds <= 1:
-        return ProbeBank([probe]), None
+        return ProbeBank([probe], trainable), None
 
     folds = assign_folds(train_labels, num_folds, seed)
     path = probe_path(encoder, dataset, k, seed, f"_x{num_folds}", results_root)
@@ -219,4 +220,4 @@ def get_probe_bank(
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save([fold_probe.state_dict() for fold_probe in probes], path)
 
-    return ProbeBank([freeze(fold_probe) for fold_probe in probes]), folds
+    return ProbeBank([freeze(fold_probe) for fold_probe in probes], trainable), folds

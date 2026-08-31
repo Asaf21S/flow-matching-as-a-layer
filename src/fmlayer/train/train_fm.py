@@ -78,6 +78,9 @@ class FlowConfig:
     cross_fit_folds: int = 1
     hybrid_lambda: float = 1.0
     margin_ratio: float = DEFAULT_MARGIN_RATIO
+    target_steps: int = 1
+    target_lr: float = 0.1
+    joint_finetune: bool = False
 
     @property
     def uses_targets(self) -> bool:
@@ -98,11 +101,15 @@ class FlowConfig:
         if self.uses_rollout:
             parts.append(f"T{self.train_steps}")
         if self.noise_std > 0:
-            parts.append(f"n{self.noise_std:g}".replace(".", ""))
+            parts.append(f"n{self.noise_std:.2f}".replace("0.", ""))
         if self.mixup_alpha > 0:
-            parts.append(f"mx{self.mixup_alpha:g}".replace(".", ""))
+            parts.append(f"m{self.mixup_alpha:.1f}".replace("0.", ""))
         if self.cross_fit_folds > 1:
             parts.append(f"x{self.cross_fit_folds}")
+        if self.joint_finetune:
+            parts.append("joint")
+        if self.target_type == "guided":
+            parts.append(f"s{self.target_steps}lr{self.target_lr}".replace("0.", ""))
         return "_".join(parts)
 
     @property
@@ -256,7 +263,20 @@ def batch_loss(
 ) -> Tensor:
     """Compute the training loss of one batch under the configured objective."""
     if config.objective == STANDARD:
-        sample = sample_paths(path, source, provider(source, labels, folds), generator)
+        if config.target_type == "guided":
+            with torch.enable_grad():
+                z_hat, _ = rollout(field, source, config.train_steps)
+                z_hat_prime = z_hat.detach()
+                for _ in range(config.target_steps):
+                    z_hat_prime.requires_grad_(True)
+                    logits = bank.logits(z_hat_prime, folds)
+                    cls_loss = nn.functional.cross_entropy(logits, labels)
+                    grad = torch.autograd.grad(cls_loss, z_hat_prime)[0]
+                    z_hat_prime = (z_hat_prime - config.target_lr * grad).detach()
+                target = z_hat_prime
+        else:
+            target = provider(source, labels, folds)
+        sample = sample_paths(path, source, target, generator)
         return nn.functional.mse_loss(field(x=sample.x_t, t=sample.t), sample.dx_t)
 
     final, _ = rollout(field, source, config.train_steps)
@@ -349,7 +369,11 @@ def train_flow(
             num_classes, config.margin_ratio,
         )
 
-    optimizer = torch.optim.AdamW(field.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    if config.joint_finetune:
+        params = list(field.parameters()) + list(bank.parameters())
+    else:
+        params = field.parameters()
+    optimizer = torch.optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max_epochs, eta_min=min_learning_rate
     )
@@ -403,6 +427,10 @@ def train_flow(
         }
 
         if epoch % EVAL_EVERY == 0 or epoch == max_epochs:
+            if config.joint_finetune:
+                with torch.no_grad():
+                    probe.weight.copy_(bank.weight[0])
+                    probe.bias.copy_(bank.bias[0])
             by_steps = {
                 steps: evaluate_transported(field, probe, val_features, val_labels, steps)
                 for steps in evaluated
@@ -416,9 +444,14 @@ def train_flow(
                 if accuracy > best_accuracy[steps]:
                     best_accuracy[steps] = accuracy
                     best_epoch[steps] = epoch
-                    best_states[steps] = {
-                        key: value.detach().clone() for key, value in field.state_dict().items()
-                    }
+                    state_dict = {key: value.detach().clone() for key, value in field.state_dict().items()}
+                    if config.joint_finetune:
+                        best_states[steps] = {
+                            "field": state_dict,
+                            "bank": {key: value.detach().clone() for key, value in bank.state_dict().items()}
+                        }
+                    else:
+                        best_states[steps] = state_dict
 
         history.append(entry)
         scheduler.step()
@@ -487,6 +520,7 @@ def run_stage3(
     bank, folds = get_probe_bank(
         encoder, dataset, k, seed, train_x, train_y, val_x, val_y,
         num_classes, device, config.cross_fit_folds, results_root,
+        trainable=config.joint_finetune,
     )
     baseline_accuracy = probe_accuracy(probe, test_x, test_y)
 
@@ -528,11 +562,29 @@ def run_stage3(
 
     if not accuracies:
         for steps in evaluated:
-            field.load_state_dict(best_states[steps])
+            state = best_states[steps]
+            if isinstance(state, dict) and "field" in state:
+                field.load_state_dict(state["field"])
+                if config.joint_finetune and state.get("bank") is not None:
+                    bank.load_state_dict(state["bank"])
+                    with torch.no_grad():
+                        probe.weight.copy_(bank.weight[0])
+                        probe.bias.copy_(bank.bias[0])
+            else:
+                field.load_state_dict(state)
             accuracies[steps] = evaluate_transported(field, probe, test_x, test_y, steps)
 
     # The returned field is the checkpoint of the largest evaluated T, for the figures.
-    field.load_state_dict(best_states[max(evaluated)])
+    state = best_states[max(evaluated)]
+    if isinstance(state, dict) and "field" in state:
+        field.load_state_dict(state["field"])
+        if config.joint_finetune and state.get("bank") is not None:
+            bank.load_state_dict(state["bank"])
+            with torch.no_grad():
+                probe.weight.copy_(bank.weight[0])
+                probe.bias.copy_(bank.bias[0])
+    else:
+        field.load_state_dict(state)
     field.eval()
     deltas = {steps: value - baseline_accuracy for steps, value in accuracies.items()}
 
