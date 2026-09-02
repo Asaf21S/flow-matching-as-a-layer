@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor, nn
 
+from src.fmlayer.models.flow_ode import rollout
 from src.fmlayer.models.probe_bank import ProbeBank
 
 CENTROIDS = "centroids"
@@ -90,6 +91,56 @@ class MarginTargets:
             return source + (shortfall / norm).unsqueeze(1) * direction
 
 
+def guided_targets(
+    field: nn.Module,
+    source: Tensor,
+    labels: Tensor,
+    bank: ProbeBank,
+    folds: Tensor | None,
+    steps: int,
+    target_steps: int = 1,
+    target_lr: float = 0.1,
+    normalize: bool = False,
+) -> Tensor:
+    """Improve the transported features with gradient steps on the classification loss.
+
+    Implements steps 1-3 of Strategy 2: transport ``source`` with the current flow, score
+    the result with the frozen classifier, and walk the features downhill on that loss.
+    The caller then trains the flow from ``source`` to the returned target.
+
+    Args:
+        field: The current velocity field.
+        source: Starting features, shape ``(batch, dim)``.
+        labels: Labels of the batch.
+        bank: Probe bank supplying the logits.
+        folds: Per-sample fold index, or ``None`` without cross-fitting.
+        steps: Euler steps used to reach ``z_hat``.
+        target_steps: Number of feature-space gradient steps.
+        target_lr: Feature-space step size.
+        normalize: Move a fixed fraction of the feature norm instead of following the raw
+            gradient scale, which makes ``target_lr`` comparable across cells.
+
+    Returns:
+        The improved target features, detached.
+    """
+    with torch.no_grad():
+        target, _ = rollout(field, source, steps)
+
+    with torch.enable_grad():
+        for _ in range(target_steps):
+            target = target.detach().requires_grad_(True)
+            loss = nn.functional.cross_entropy(bank.logits(target, folds), labels)
+            gradient = torch.autograd.grad(loss, target)[0]
+            if normalize:
+                direction = gradient / gradient.norm(dim=1, keepdim=True).clamp_min(EPSILON)
+                step = target_lr * target.detach().norm(dim=1, keepdim=True) * direction
+            else:
+                step = target_lr * gradient
+            target = target.detach() - step
+
+    return target.detach()
+
+
 def build_target_provider(
     target_type: str,
     features: Tensor,
@@ -98,7 +149,7 @@ def build_target_provider(
     probe: nn.Linear,
     num_classes: int,
     margin_ratio: float = DEFAULT_MARGIN_RATIO,
-) -> ClassTargets | MarginTargets:
+) -> ClassTargets | MarginTargets | None:
     """Build the target provider named by ``target_type``.
 
     Args:
@@ -111,7 +162,9 @@ def build_target_provider(
         margin_ratio: Margin distance as a fraction of the mean feature norm.
 
     Returns:
-        A callable mapping ``(source, labels, folds)`` to per-sample targets.
+        A callable mapping ``(source, labels, folds)`` to per-sample targets, or ``None``
+        for the guided target, which depends on the flow and is built per batch by
+        :func:`guided_targets`.
     """
     if target_type == CENTROIDS:
         return ClassTargets(class_centroids(features, labels, num_classes))

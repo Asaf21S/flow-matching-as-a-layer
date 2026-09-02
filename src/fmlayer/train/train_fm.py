@@ -17,10 +17,12 @@ from src.fmlayer.models.probe_bank import ProbeBank
 from src.fmlayer.models.targets import (
     CENTROIDS,
     DEFAULT_MARGIN_RATIO,
+    GUIDED,
     MARGIN,
     NO_TARGET,
     PROBE_WEIGHTS,
     build_target_provider,
+    guided_targets,
 )
 from src.fmlayer.models.velocity_field import (
     build_path,
@@ -28,7 +30,7 @@ from src.fmlayer.models.velocity_field import (
     feature_statistics,
     sample_paths,
 )
-from src.fmlayer.train.probes import get_probe, get_probe_bank, load_cached_probe
+from src.fmlayer.train.probes import clone_probe, get_probe, get_probe_bank, load_cached_probe
 from src.fmlayer.train.train_linear import to_tensors
 from src.fmlayer.utils.results import default_results_root, record_run
 from src.fmlayer.utils.seeding import set_seed
@@ -43,6 +45,15 @@ EVAL_EVERY = 10
 CURVES_DIRNAME = "curves_fm_stage3"
 MODELS_DIRNAME = "models_stage3"
 STEP_COUNTS = (4, 12)
+EPSILON = 1e-8
+
+# The brief fixes one encoder per dataset, one training-set size and one T for all of
+# Stage 3. These are that choice.
+MAIN_CELLS = (("resnet18", "aircraft"), ("dinov2_vits14", "dtd"))
+MAIN_K = 10
+MAIN_STEPS = 12
+MAIN_STEP_COUNTS = (MAIN_STEPS,)
+GUIDED_NOISE = 0.15
 
 STANDARD = "standard"
 ROLLED_MSE = "rolled_mse"
@@ -53,6 +64,16 @@ OBJECTIVES = (STANDARD, ROLLED_MSE, ROLLED_CE, HYBRID)
 # Objectives whose loss never reads a geometric target; sweeping target types for
 # them would train identical models.
 TARGET_FREE_OBJECTIVES = (ROLLED_CE,)
+
+
+def compact(value: float) -> str:
+    """Format a number for a filename tag without collapsing distinct values.
+
+    The previous scheme stripped ``"0."``, which mapped ``0.1`` and ``1`` onto the same
+    tag. Since the tag is the checkpoint key, an ablation over that knob silently reloaded
+    the wrong run.
+    """
+    return f"{value:g}".replace(".", "p").replace("-", "m")
 
 
 @dataclass(frozen=True)
@@ -68,6 +89,13 @@ class FlowConfig:
         cross_fit_folds: Number of held-out probes the flow trains against; 1 disables it.
         hybrid_lambda: Weight of the geometric term in the hybrid objective.
         margin_ratio: Margin distance as a fraction of the mean feature norm.
+        target_steps: Feature-space gradient steps taken to build a guided target.
+        target_lr: Feature-space step size of those gradient steps.
+        target_normalize: Constrain each guided step to a fixed fraction of the feature norm.
+        target_refresh: Recompute guided targets every N epochs; 1 recomputes every batch.
+        displacement_lambda: Penalty on ``||z_hat - z||``, relative to the feature scale.
+        velocity_lambda: Penalty on the predicted velocities, relative to the feature scale.
+        joint_finetune: Also train the linear classifier, on a private copy of the probe.
     """
 
     objective: str = STANDARD
@@ -80,6 +108,10 @@ class FlowConfig:
     margin_ratio: float = DEFAULT_MARGIN_RATIO
     target_steps: int = 1
     target_lr: float = 0.1
+    target_normalize: bool = False
+    target_refresh: int = 1
+    displacement_lambda: float = 0.0
+    velocity_lambda: float = 0.0
     joint_finetune: bool = False
 
     @property
@@ -93,24 +125,47 @@ class FlowConfig:
         return self.objective != STANDARD
 
     @property
+    def uses_guided_targets(self) -> bool:
+        """Whether the target is built by running the classifier-guided procedure."""
+        return self.uses_targets and self.target_type == GUIDED
+
+    @property
+    def uses_train_steps(self) -> bool:
+        """Whether ``train_steps`` changes the trained model, and so must be in the tag.
+
+        The standard objective is T-agnostic, but a guided target is built by a T-step
+        rollout, so guided runs at different T are different models.
+        """
+        return self.uses_rollout or self.uses_guided_targets
+
+    @property
     def name(self) -> str:
         """Short identifier used in tags, filenames and the ``method`` column."""
         parts = [self.objective]
         if self.uses_targets:
             parts.append(self.target_type)
-        if self.uses_rollout:
+        if self.uses_train_steps:
             parts.append(f"T{self.train_steps}")
         if self.noise_std > 0:
-            parts.append(f"n{self.noise_std:.2f}".replace("0.", ""))
+            parts.append(f"n{compact(self.noise_std)}")
         if self.mixup_alpha > 0:
-            parts.append(f"m{self.mixup_alpha:.1f}".replace("0.", ""))
+            parts.append(f"m{compact(self.mixup_alpha)}")
         if self.cross_fit_folds > 1:
             parts.append(f"x{self.cross_fit_folds}")
+        if self.displacement_lambda > 0:
+            parts.append(f"dl{compact(self.displacement_lambda)}")
+        if self.velocity_lambda > 0:
+            parts.append(f"vl{compact(self.velocity_lambda)}")
         if self.joint_finetune:
             parts.append("joint")
-        if self.target_type == "guided":
-            parts.append(f"s{self.target_steps}lr{self.target_lr}".replace("0.", ""))
+        if self.uses_guided_targets:
+            parts.append(f"s{self.target_steps}lr{compact(self.target_lr)}")
+            if self.target_normalize:
+                parts.append("norm")
+            if self.target_refresh > 1:
+                parts.append(f"r{self.target_refresh}")
         return "_".join(parts)
+
 
     @property
     def method(self) -> str:
@@ -128,6 +183,57 @@ class FlowConfig:
         Standard training is T-agnostic and is evaluated at every count.
         """
         return (self.train_steps,) if self.uses_rollout else tuple(step_counts)
+
+
+def main_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, ...]:
+    """The comparison the brief asks for, plus its optional extension.
+
+    The Stage 1 linear probe is the fourth member of the comparison and needs no
+    configuration: it is the ``baseline_accuracy`` every run reports.
+    """
+    return (
+        # Strategy 1: end-to-end rolled-out classification training.
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps),
+        # Strategy 2: classifier-guided targets, trained with a standard FM update.
+        FlowConfig(STANDARD, GUIDED, train_steps),
+        # The same, with the perturbed sources the earlier runs used; kept so the
+        # deviation is measured rather than assumed.
+        FlowConfig(STANDARD, GUIDED, train_steps, noise_std=GUIDED_NOISE),
+        # Optional extension: unfreeze the classifier and train it with the flow.
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, joint_finetune=True),
+    )
+
+
+def rolled_regularization_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, ...]:
+    """Strategy 1's suggested regularisers: penalise displacement or velocity.
+
+    Both penalties are divided by the mean squared feature norm, so the weights mean the
+    same thing on ResNet-18 and on DINOv2.
+    """
+    return (
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, displacement_lambda=0.1),
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, displacement_lambda=1.0),
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, velocity_lambda=0.1),
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, velocity_lambda=1.0),
+    )
+
+
+def guided_ablation_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, ...]:
+    """Strategy 2's four knobs: step size, number of steps, constraint, refresh rate.
+
+    The first entry is the main-comparison run itself, so the sweep always contains its
+    own reference and costs nothing extra to include.
+    """
+    return (
+        FlowConfig(STANDARD, GUIDED, train_steps),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=0.01),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=1.0),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_steps=3),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_steps=10),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_normalize=True),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_refresh=10),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_refresh=50),
+    )
 
 
 def default_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
@@ -250,6 +356,32 @@ def perturb_sources(
     return source
 
 
+def rollout_penalty(source: Tensor, final: Tensor, states: Tensor, config: FlowConfig) -> Tensor:
+    """Penalise unnecessarily large changes to the representation.
+
+    Both terms are divided by the mean squared feature norm, which makes the weights
+    dimensionless and comparable across encoders.
+
+    Args:
+        source: Starting features of the batch.
+        final: Transported features.
+        states: Every intermediate state, shape ``(steps + 1, batch, dim)``.
+        config: Configuration supplying the penalty weights.
+
+    Returns:
+        The weighted penalty, a scalar.
+    """
+    scale = source.pow(2).sum(dim=1).mean().detach().clamp_min(EPSILON)
+    penalty = source.new_zeros(())
+    if config.displacement_lambda > 0:
+        displacement = (final - source).pow(2).sum(dim=1).mean()
+        penalty = penalty + config.displacement_lambda * displacement / scale
+    if config.velocity_lambda > 0:
+        velocities = (states[1:] - states[:-1]) * config.train_steps
+        penalty = penalty + config.velocity_lambda * velocities.pow(2).sum(dim=-1).mean() / scale
+    return penalty
+
+
 def batch_loss(
     field: nn.Module,
     path,
@@ -260,37 +392,38 @@ def batch_loss(
     folds: Tensor | None,
     config: FlowConfig,
     generator: torch.Generator,
+    precomputed_target: Tensor | None = None,
 ) -> Tensor:
     """Compute the training loss of one batch under the configured objective."""
     if config.objective == STANDARD:
-        if config.target_type == "guided":
-            with torch.enable_grad():
-                z_hat, _ = rollout(field, source, config.train_steps)
-                z_hat_prime = z_hat.detach()
-                for _ in range(config.target_steps):
-                    z_hat_prime.requires_grad_(True)
-                    logits = bank.logits(z_hat_prime, folds)
-                    cls_loss = nn.functional.cross_entropy(logits, labels)
-                    grad = torch.autograd.grad(cls_loss, z_hat_prime)[0]
-                    z_hat_prime = (z_hat_prime - config.target_lr * grad).detach()
-                target = z_hat_prime
+        if config.uses_guided_targets:
+            target = precomputed_target
+            if target is None:
+                target = guided_targets(
+                    field, source, labels, bank, folds, config.train_steps,
+                    config.target_steps, config.target_lr, config.target_normalize,
+                )
         else:
             target = provider(source, labels, folds)
         sample = sample_paths(path, source, target, generator)
         return nn.functional.mse_loss(field(x=sample.x_t, t=sample.t), sample.dx_t)
 
-    final, _ = rollout(field, source, config.train_steps)
+    final, states = rollout(field, source, config.train_steps)
 
     if config.objective == ROLLED_MSE:
-        return nn.functional.mse_loss(final, provider(source, labels, folds))
-    if config.objective == ROLLED_CE:
-        return nn.functional.cross_entropy(bank.logits(final, folds), labels)
-    if config.objective == HYBRID:
+        loss = nn.functional.mse_loss(final, provider(source, labels, folds))
+    elif config.objective == ROLLED_CE:
+        loss = nn.functional.cross_entropy(bank.logits(final, folds), labels)
+    elif config.objective == HYBRID:
         classification = nn.functional.cross_entropy(bank.logits(final, folds), labels)
         geometric = nn.functional.mse_loss(final, provider(source, labels, folds))
-        return classification + config.hybrid_lambda * geometric
+        loss = classification + config.hybrid_lambda * geometric
+    else:
+        raise ValueError(f"Unknown objective {config.objective!r}. Available: {sorted(OBJECTIVES)}")
 
-    raise ValueError(f"Unknown objective {config.objective!r}. Available: {sorted(OBJECTIVES)}")
+    if config.displacement_lambda > 0 or config.velocity_lambda > 0:
+        loss = loss + rollout_penalty(source, final, states, config)
+    return loss
 
 
 @torch.no_grad()
@@ -307,6 +440,33 @@ def evaluate_transported(
     """Top-1 accuracy of the frozen probe on features transported for ``steps`` steps."""
     probe.eval()
     return (probe(transport(field, features, steps)).argmax(dim=1) == labels).float().mean().item()
+
+
+@torch.no_grad()
+def transported_metrics(
+    field: nn.Module, probe: nn.Linear, features: Tensor, labels: Tensor, steps: int
+) -> tuple[float, float]:
+    """Accuracy and cross-entropy of the probe on transported features.
+
+    The two Stage 3 objectives minimise different quantities, so their training losses
+    cannot be compared to each other. The cross-entropy of the frozen classifier can, and
+    it is what the whole system is ultimately judged on.
+
+    Args:
+        field: The velocity field.
+        probe: The classifier the features are scored with.
+        features: Features to score.
+        labels: Labels matching ``features``.
+        steps: Euler steps.
+
+    Returns:
+        Top-1 accuracy and mean cross-entropy.
+    """
+    probe.eval()
+    logits = probe(transport(field, features, steps))
+    accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
+    return accuracy, nn.functional.cross_entropy(logits, labels).item()
+
 
 
 def train_flow(
@@ -339,7 +499,8 @@ def train_flow(
         seed: Seed controlling initialisation, shuffling and augmentation.
         device: Device to train on.
         config: The flow configuration.
-        probe: Frozen probe used for validation scoring.
+        probe: Probe used for validation scoring. Frozen, except under joint fine-tuning,
+            where the caller passes a private copy this function is allowed to overwrite.
         bank: Probe bank used inside the training loss.
         folds: Per-sample fold index, or ``None`` without cross-fitting.
         step_counts: Step counts a standard-objective field is evaluated at.
@@ -385,6 +546,7 @@ def train_flow(
     evaluated = config.eval_steps(step_counts)
 
     history: list[dict] = []
+    target_cache: Tensor | None = None
     initial_state = {key: value.detach().clone() for key, value in field.state_dict().items()}
     best_states = {steps: initial_state for steps in evaluated}
     best_accuracy = {steps: -1.0 for steps in evaluated}
@@ -395,6 +557,15 @@ def train_flow(
         order = torch.randperm(num_train, generator=generator).to(device)
         partners = same_class_permutation(train_labels, generator) if config.mixup_alpha > 0 else None
         loss_total = 0.0
+
+        # With a refresh rate above 1 the guided targets are computed once for the whole
+        # training set and reused, instead of being rebuilt for every batch.
+        if config.uses_guided_targets and config.target_refresh > 1:
+            if (epoch - 1) % config.target_refresh == 0:
+                target_cache = guided_targets(
+                    field, train_features, train_labels, bank, folds, config.train_steps,
+                    config.target_steps, config.target_lr, config.target_normalize,
+                )
 
         for start in range(0, num_train, batch_size):
             batch = order[start : start + batch_size]
@@ -415,6 +586,7 @@ def train_flow(
                 folds[batch] if folds is not None else None,
                 config,
                 generator,
+                target_cache[batch] if target_cache is not None else None,
             )
             loss.backward()
             optimizer.step()
@@ -431,12 +603,25 @@ def train_flow(
                 with torch.no_grad():
                     probe.weight.copy_(bank.weight[0])
                     probe.bias.copy_(bank.bias[0])
-            by_steps = {
-                steps: evaluate_transported(field, probe, val_features, val_labels, steps)
+            measured = {
+                steps: transported_metrics(field, probe, val_features, val_labels, steps)
                 for steps in evaluated
             }
+            by_steps = {steps: accuracy for steps, (accuracy, _) in measured.items()}
             entry["val_by_steps"] = {str(key): value for key, value in by_steps.items()}
+            entry["val_loss_by_steps"] = {
+                str(key): loss_value for key, (_, loss_value) in measured.items()
+            }
             entry["val_accuracy"] = max(by_steps.values())
+            entry["val_loss"] = min(loss_value for _, loss_value in measured.values())
+
+            # Training accuracy of the whole system, which is what separates "the flow
+            # generalises" from "the flow memorised the K-shot subset".
+            train_accuracy, train_ce = transported_metrics(
+                field, probe, train_features, train_labels, max(evaluated)
+            )
+            entry["train_accuracy"] = train_accuracy
+            entry["train_ce"] = train_ce
 
             # Each T keeps its own best checkpoint, so the selection criterion and the
             # reported metric are the same quantity.
@@ -517,12 +702,19 @@ def run_stage3(
     probe = get_probe(
         encoder, dataset, k, seed, train_x, train_y, val_x, val_y, num_classes, device, results_root
     )
+    baseline_accuracy = probe_accuracy(probe, test_x, test_y)
+    frozen_probe = probe
+    if config.joint_finetune:
+        # The cached probe is shared by every configuration of this cell. Joint
+        # fine-tuning writes into it, so it gets a private copy and the Stage 1 baseline
+        # stays pristine for every other run in the session.
+        probe = clone_probe(frozen_probe)
+
     bank, folds = get_probe_bank(
         encoder, dataset, k, seed, train_x, train_y, val_x, val_y,
         num_classes, device, config.cross_fit_folds, results_root,
         trainable=config.joint_finetune,
     )
-    baseline_accuracy = probe_accuracy(probe, test_x, test_y)
 
     root = Path(results_root) if results_root is not None else default_results_root()
     tag = stage3_tag(encoder, dataset, k, seed, config)
@@ -543,6 +735,9 @@ def run_stage3(
         history = payload["history"]
         best_epoch = {int(key): value for key, value in payload["best_epoch"].items()}
         accuracies = {int(key): value for key, value in payload["accuracy_by_steps"].items()}
+        # Stage 3 fixes one T, so a cache that also holds other step counts must not leak
+        # them back into runs.csv.
+        accuracies = {steps: value for steps, value in accuracies.items() if steps in evaluated}
         # A cache written for different step counts cannot answer this request.
         if not set(evaluated).issubset(best_states):
             loaded = False
@@ -655,6 +850,7 @@ def run_stage3(
         "train_steps": config.train_steps,
         "fm_layer": field,
         "classifier": probe,
+        "baseline_classifier": frozen_probe,
         "baseline_accuracy": baseline_accuracy,
         "accuracy_by_steps": accuracies,
         "delta_by_steps": deltas,
@@ -733,6 +929,41 @@ def run_all_stage3(
 
     print(f"\n{len(results)} Stage 3 FM runs complete.")
     return results
+
+
+def run_stage3_main(
+    k: int | str = MAIN_K,
+    seeds: tuple[int, ...] = SEEDS,
+    cells: tuple[tuple[str, str], ...] = MAIN_CELLS,
+    configs: tuple[FlowConfig, ...] | None = None,
+    train_steps: int = MAIN_STEPS,
+    **kwargs,
+) -> dict:
+    """Run the Stage 3 comparison: frozen probe vs rolled-out vs classifier-guided.
+
+    One encoder per dataset, one training-set size and one number of Euler steps, exactly
+    as the brief prescribes. ``step_counts`` is pinned to ``train_steps`` so nothing is
+    ever reported at a T the study did not choose.
+
+    Args:
+        k: Shots per class, or ``"full"``.
+        seeds: Seeds to average over.
+        cells: ``(encoder, dataset)`` pairs; one representative encoder per dataset.
+        configs: Flow configurations; defaults to :func:`main_configs`.
+        train_steps: The single T used throughout Stage 3.
+        kwargs: Forwarded to :func:`run_all_stage3`.
+
+    Returns:
+        One result per run, keyed by ``"config/encoder/dataset/k/seed"``.
+    """
+    return run_all_stage3(
+        cells=cells,
+        k_values=(k,),
+        seeds=seeds,
+        configs=configs if configs is not None else main_configs(train_steps),
+        step_counts=(train_steps,),
+        **kwargs,
+    )
 
 
 def stage3_cache_summary(results_root: Path | None = None) -> dict:
@@ -816,12 +1047,17 @@ def load_stage3_results(
                     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
                     best_states = {int(key): value for key, value in checkpoint["best_states"].items()}
 
+                    # A joint run stores {"field": ..., "bank": ...}; every other run
+                    # stores the field's state dict directly.
+                    largest = max(best_states)
+                    state = best_states[largest]
+                    field_state = state["field"] if "field" in state else state
+
                     # The checkpoint carries the standardisation buffers, so the field can
                     # be rebuilt without re-reading the training features.
-                    largest = max(best_states)
-                    embed_dim = best_states[largest]["feature_mean"].numel()
+                    embed_dim = field_state["feature_mean"].numel()
                     field = build_velocity_field(embed_dim=embed_dim, seed=seed, device=device)
-                    field.load_state_dict(best_states[largest])
+                    field.load_state_dict(field_state)
                     field.eval()
 
                     probe = load_cached_probe(
@@ -832,7 +1068,19 @@ def load_stage3_results(
                         missing.append(f"{tag} (probe)")
                         continue
 
+                    # Never write the fine-tuned weights into the cached frozen probe.
+                    classifier = probe
+                    if state.get("bank") is not None:
+                        classifier = clone_probe(probe)
+                        with torch.no_grad():
+                            classifier.weight.copy_(state["bank"]["weight"][0])
+                            classifier.bias.copy_(state["bank"]["bias"][0])
+
                     accuracies = {int(key): value for key, value in payload["accuracy_by_steps"].items()}
+                    evaluated = config.eval_steps(step_counts)
+                    accuracies = {
+                        steps: value for steps, value in accuracies.items() if steps in evaluated
+                    }
                     baseline_accuracy = payload["baseline_accuracy"]
                     results[f"{config.name}/{encoder}/{dataset}/{k}/{seed}"] = {
                         "encoder": encoder,
@@ -845,7 +1093,8 @@ def load_stage3_results(
                         "target_type": config.resolved_target(),
                         "train_steps": config.train_steps,
                         "fm_layer": field,
-                        "classifier": probe,
+                        "classifier": classifier,
+                        "baseline_classifier": probe,
                         "baseline_accuracy": baseline_accuracy,
                         "accuracy_by_steps": accuracies,
                         "delta_by_steps": {

@@ -31,11 +31,15 @@ def flow_diagnostics(
         Displacement statistics and the correct/incorrect flip counts.
     """
     probe: nn.Linear = result["classifier"]
+    # The joint variant fine-tunes its own classifier, so "before" has to be read off the
+    # untouched Stage 1 probe or the baseline would move with the method under test.
+    baseline_probe: nn.Linear = result.get("baseline_classifier", probe)
     probe.eval()
+    baseline_probe.eval()
     steps = steps if steps is not None else max(result["accuracy_by_steps"])
 
     transported = transport(result["fm_layer"], features, steps)
-    base_prediction = probe(features).argmax(dim=1)
+    base_prediction = baseline_probe(features).argmax(dim=1)
     flow_prediction = probe(transported).argmax(dim=1)
 
     base_correct = base_prediction == labels
