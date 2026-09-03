@@ -236,6 +236,38 @@ def guided_ablation_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, 
     )
 
 
+def saturation_escape_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, ...]:
+    """Variants built to survive a probe that has memorised its K-shot training subset.
+
+    Both strategies in the brief read the same signal: the gradient of the classification
+    loss at the training features. When the probe is already perfect there, that gradient
+    vanishes and the flow stays at its identity initialisation. Each entry below removes
+    that dependency in a different way — by constraining the step so it cannot vanish, by
+    perturbing the sources until the probe is genuinely wrong on them, or by using a
+    geometric target that never reads the gradient at all.
+    """
+    return (
+        # Constrained guided steps: the target moves a fixed fraction of the feature norm,
+        # whatever the gradient magnitude.
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=0.05, target_normalize=True),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=0.15, target_normalize=True),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=0.3, target_normalize=True),
+        # Sources perturbed hard enough that the probe actually makes mistakes on them.
+        FlowConfig(
+            STANDARD, GUIDED, train_steps,
+            noise_std=0.5, target_lr=0.15, target_normalize=True,
+        ),
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, noise_std=0.5),
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, noise_std=1.0),
+        # Geometric targets, which never read the saturated gradient. The probe-weight
+        # family was the only one that beat the baseline in the Stage 3 screening.
+        FlowConfig(STANDARD, PROBE_WEIGHTS, train_steps, noise_std=0.15),
+        FlowConfig(ROLLED_MSE, PROBE_WEIGHTS, train_steps),
+        FlowConfig(STANDARD, MARGIN, train_steps, noise_std=0.15),
+        FlowConfig(ROLLED_MSE, MARGIN, train_steps),
+    )
+
+
 def default_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
     """The eight configurations the full grid runs.
 

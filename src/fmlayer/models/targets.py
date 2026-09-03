@@ -129,7 +129,13 @@ def guided_targets(
     with torch.enable_grad():
         for _ in range(target_steps):
             target = target.detach().requires_grad_(True)
-            loss = nn.functional.cross_entropy(bank.logits(target, folds), labels)
+            # Sum, not mean: with mean reduction each sample's gradient is divided by the
+            # batch size, so the step would be ~256x smaller than target_lr says and would
+            # change meaning whenever the batch size changed. Summing gives every sample
+            # its own dCE_i/dz_i at full scale.
+            loss = nn.functional.cross_entropy(
+                bank.logits(target, folds), labels, reduction="sum"
+            )
             gradient = torch.autograd.grad(loss, target)[0]
             if normalize:
                 direction = gradient / gradient.norm(dim=1, keepdim=True).clamp_min(EPSILON)

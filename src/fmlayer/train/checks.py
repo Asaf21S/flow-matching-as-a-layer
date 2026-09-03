@@ -23,6 +23,7 @@ from src.fmlayer.train.train_fm import (
     guided_ablation_configs,
     main_configs,
     rolled_regularization_configs,
+    saturation_escape_configs,
 )
 
 TOLERANCE = 1e-4
@@ -164,6 +165,14 @@ def check_guided_targets(device: torch.device) -> None:
     )
     moved = (constrained - features).norm(dim=1) / features.norm(dim=1)
     assert torch.allclose(moved, torch.full_like(moved, fraction), atol=1e-3), moved[:4]
+
+    # The step must be the sample's own gradient, not the batch mean: splitting the batch
+    # must not change any target. With mean reduction this is off by the batch size.
+    half = len(features) // 2
+    first = guided_targets(field, features[:half], labels[:half], bank, None, 12, 1, 0.1)
+    second = guided_targets(field, features[half:], labels[half:], bank, None, 12, 1, 0.1)
+    whole = guided_targets(field, features, labels, bank, None, 12, 1, 0.1)
+    assert torch.allclose(torch.cat([first, second]), whole, atol=TOLERANCE)
     print("  guided targets        OK")
 
 
@@ -206,7 +215,11 @@ def check_probe_clone(device: torch.device) -> None:
 def check_config_tags(device: torch.device) -> None:
     """Distinct configurations must get distinct tags, since the tag is the cache key."""
     configs = (
-        all_configs() + main_configs() + guided_ablation_configs() + rolled_regularization_configs()
+        all_configs()
+        + main_configs()
+        + guided_ablation_configs()
+        + rolled_regularization_configs()
+        + saturation_escape_configs()
     )
     names: dict[str, FlowConfig] = {}
     for config in configs:
