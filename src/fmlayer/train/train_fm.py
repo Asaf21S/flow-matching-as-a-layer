@@ -268,7 +268,46 @@ def saturation_escape_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig
     )
 
 
+def noise_sweep_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, ...]:
+    """How hard the sources must be perturbed before the frozen probe is wrong on them.
+
+    The signal diagnostics show the probe still at 98.9% training accuracy on DINOv2 even
+    at sigma = 1.0, so the useful range plausibly extends further than the escape sweep
+    tested. Cheap: one seed, one knob.
+    """
+    return tuple(
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, noise_std=sigma)
+        for sigma in (0.5, 1.0, 1.5, 2.0, 3.0)
+    )
+
+
+def promising_configs(train_steps: int = MAIN_STEPS) -> tuple[FlowConfig, ...]:
+    """The seed-0 survivors, promoted to the full three-seed comparison.
+
+    Chosen from the regularisation, guided-knob and escape sweeps: every entry either beat
+    the frozen probe on both cells or beat it decisively on one. The combination of strong
+    source noise with a velocity penalty is the one configuration not yet measured — it
+    joins the two ingredients that each worked on their own.
+    """
+    return (
+        # Strong perturbation was the single best result (+0.0176 on DTD/DINOv2).
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, noise_std=1.0),
+        # The brief's own regulariser, which repaired the rolled-out objective everywhere.
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, velocity_lambda=1.0),
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, displacement_lambda=0.1),
+        # Both ingredients together; untested so far.
+        FlowConfig(ROLLED_CE, NO_TARGET, train_steps, noise_std=1.0, velocity_lambda=1.0),
+        # Guided variants that were positive on both cells.
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=1.0),
+        FlowConfig(STANDARD, GUIDED, train_steps, target_lr=0.15, target_normalize=True),
+        # Geometric targets: margin helped Aircraft, probe weights helped DINOv2.
+        FlowConfig(STANDARD, MARGIN, train_steps, noise_std=0.15),
+        FlowConfig(ROLLED_MSE, PROBE_WEIGHTS, train_steps),
+    )
+
+
 def default_configs(step_counts: tuple[int, ...] = STEP_COUNTS) -> tuple[FlowConfig, ...]:
+
     """The eight configurations the full grid runs.
 
     Selected by screening every variant on all three cells at K=full, seed 0. Each entry

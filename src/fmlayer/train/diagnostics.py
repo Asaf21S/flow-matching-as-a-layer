@@ -109,15 +109,16 @@ def print_diagnostics(frame: pd.DataFrame) -> None:
         frame: Output of :func:`diagnose_all`.
     """
     print(
-        f"{'configuration':<40} {'delta':>8} {'move':>7} {'flip%':>7} "
+        f"{'cell':<22} {'configuration':<38} {'delta':>8} {'move':>7} {'flip%':>7} "
         f"{'fixed':>6} {'broken':>7} {'net':>5}"
     )
-    print("-" * 84)
+    print("-" * 106)
     for _, row in frame.iterrows():
+        cell = f"{row['dataset']}/{row['encoder']}"
         print(
-            f"{row['config_name']:<40} {row['delta']:>+8.4f} {row['rel_displacement']:>7.3f} "
-            f"{100 * row['changed_frac']:>6.1f}% {row['fixed']:>6} {row['broken']:>7} "
-            f"{row['net']:>+5}"
+            f"{cell:<22} {row['config_name']:<38} {row['delta']:>+8.4f} "
+            f"{row['rel_displacement']:>7.3f} {100 * row['changed_frac']:>6.1f}% "
+            f"{row['fixed']:>6} {row['broken']:>7} {row['net']:>+5}"
         )
     print(
         "\nmove   = mean ||z_T - z_0|| / ||z_0||   (0 means the flow is the identity)\n"

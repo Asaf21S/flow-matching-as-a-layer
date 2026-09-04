@@ -22,6 +22,8 @@ from src.fmlayer.train.train_fm import (
     batch_loss,
     guided_ablation_configs,
     main_configs,
+    noise_sweep_configs,
+    promising_configs,
     rolled_regularization_configs,
     saturation_escape_configs,
 )
@@ -220,6 +222,8 @@ def check_config_tags(device: torch.device) -> None:
         + guided_ablation_configs()
         + rolled_regularization_configs()
         + saturation_escape_configs()
+        + noise_sweep_configs()
+        + promising_configs()
     )
     names: dict[str, FlowConfig] = {}
     for config in configs:
