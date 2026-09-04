@@ -145,42 +145,83 @@ only one that pushes $\sigma$ far enough to manufacture real classifier errors.
 
 ### Escaping the saturation
 
-Seed 0 only, so these are leads rather than results. Deltas against the same frozen probe.
+Sixteen variants were screened on seed 0, and the eight survivors were then confirmed over
+seeds 0/1/2. Only the confirmed table is reported. `*` marks a delta larger than twice its
+paired standard deviation.
 
 | Configuration | Aircraft / ResNet-18 | DTD / DINOv2 |
 | --- | --- | --- |
-| `rolled_ce_T12` (Strategy 1, reference) | -0.0105 | -0.0074 |
-| `rolled_ce_T12_n1` (source noise $\sigma = 1$) | **+0.0033** | **+0.0176** |
-| `rolled_ce_T12_vl1` (velocity penalty) | +0.0066 | -0.0043 |
-| `rolled_ce_T12_dl0p1` (displacement penalty) | +0.0051 | -0.0037 |
-| `standard_margin_n0p15` | +0.0045 | -0.0005 |
-| `rolled_mse_probe_weights_T12` | -0.0306 | **+0.0117** |
-| `standard_guided_T12_s1lr1` | +0.0027 | +0.0016 |
-| `standard_guided_T12_s1lr0p15_norm` | +0.0009 | +0.0027 |
+| `rolled_ce_T12` (Strategy 1, reference) | -0.0119 +/- 0.0073 | -0.0076 +/- 0.0077 |
+| `rolled_ce_T12_dl0p1` (displacement penalty) | **+0.0096 +/- 0.0039 \*** | +0.0000 +/- 0.0033 |
+| `rolled_ce_T12_vl1` (velocity penalty) | +0.0128 +/- 0.0081 | -0.0016 +/- 0.0030 |
+| `rolled_ce_T12_n1` (source noise $\sigma = 1$) | +0.0009 +/- 0.0050 | +0.0067 +/- 0.0097 |
+| `rolled_ce_T12_n1_vl1` (both) | +0.0013 +/- 0.0051 | +0.0066 +/- 0.0077 |
+| `standard_guided_T12_s1lr1` (step size 1.0) | +0.0058 +/- 0.0035 | **+0.0021 +/- 0.0005 \*** |
+| `standard_guided_T12_s1lr0p15_norm` | -0.0002 +/- 0.0045 | +0.0055 +/- 0.0054 |
+| `standard_margin_n0p15` | **+0.0075 +/- 0.0027 \*** | -0.0005 +/- 0.0000 |
+| `rolled_mse_probe_weights_T12` | **-0.0339 +/- 0.0030 \*** | **+0.0094 +/- 0.0020 \*** |
 
-Two things stand out. First, **every one of the brief's suggested regularisers repairs the
-rolled-out objective**: all four settings beat the unregularised `rolled_ce_T12` on both
-cells, by $+0.0031$ to $+0.0171$, turning Aircraft from $-0.0105$ to $+0.0066$. Second,
-**strong source perturbation is the only change that produces a clear gain**, $+0.0176$ on
-DTD/DINOv2.
+**Four configurations now beat the frozen probe by more than twice their spread**, and the
+structure is interpretable rather than random:
 
-The flow diagnostics confirm that this gain is real transport rather than noise:
+- **Regularising the rolled-out objective works on Aircraft.** `dl0p1` turns Strategy 1
+  from $-0.0119$ into $+0.0096$, a swing of $+0.0215$. `vl1` has an even larger mean
+  ($+0.0128$) but does not clear the bar.
+- **The margin target is the most reliable small gain on Aircraft** ($+0.0075$ with the
+  smallest spread of any positive entry).
+- **The probe-weight target splits the two cells with opposite signs, both significant**:
+  $+0.0094$ on DINOv2, $-0.0339$ on ResNet-18. It is the only target aligned with the frozen
+  decision rule by construction, and it helps exactly where the probe is already strong.
+- **A larger guided step is a small but very consistent gain on DINOv2**
+  ($+0.0016, +0.0021, +0.0027$ across the three seeds).
+
+**A caution, and a lesson.** The single best seed-0 result, `rolled_ce_T12_n1` at $+0.0176$
+on DTD, **did not replicate**: over three seeds it is $+0.0067 \pm 0.0097$
+($+0.0176, -0.0011, +0.0037$). Sixteen configurations were screened on one seed, so at least
+one large-looking number was expected by chance. This is the reason nothing is reported from
+a single seed, and it is worth stating explicitly in the presentation.
+
+The flow diagnostics confirm the surviving gains are real transport rather than luck:
 
 | Cell | Configuration | Delta | move | flip% | fixed | broken | net |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| DTD / DINOv2 | `rolled_ce_T12_n1` | +0.0176 | 0.303 | 12.3% | 86 | 53 | +33 |
+| Aircraft / RN18 | `rolled_ce_T12_vl1` | +0.0219 | 0.057 | 27.1% | 151 | 78 | +73 |
+| Aircraft / RN18 | `rolled_ce_T12_dl0p1` | +0.0120 | 0.112 | 35.7% | 176 | 136 | +40 |
+| Aircraft / RN18 | `standard_margin_n0p15` | +0.0096 | 0.026 | 15.5% | 84 | 52 | +32 |
 | DTD / DINOv2 | `rolled_mse_probe_weights_T12` | +0.0117 | 0.821 | 14.1% | 84 | 62 | +22 |
-| Aircraft / RN18 | `standard_margin_n0p15` | +0.0045 | 0.025 | 15.4% | 77 | 62 | +15 |
-| Aircraft / RN18 | `rolled_ce_T12_n1` | +0.0033 | 0.039 | 13.2% | 55 | 44 | +11 |
-| Aircraft / RN18 | `standard_probe_weights_n0p15` | -0.0282 | 0.891 | 51.5% | 170 | 264 | -94 |
-| Aircraft / RN18 | `rolled_mse_probe_weights_T12` | -0.0306 | 1.129 | 60.9% | 211 | 313 | -102 |
+| DTD / DINOv2 | `standard_guided_T12_s1lr1` | +0.0027 | 0.014 | 1.0% | 8 | 3 | +5 |
+| Aircraft / RN18 | `rolled_mse_probe_weights_T12` | -0.0366 | 1.161 | 66.3% | 234 | 356 | -122 |
 
 `move` is the mean relative displacement, `fixed` counts wrong-to-right label flips and
-`broken` right-to-wrong. The winning configuration moves features a substantial 30% of
-their norm and fixes 86 test images while breaking 53. The probe-weight target is the
-mirror image on Aircraft: it moves features more than their own norm and breaks 313.
+`broken` right-to-wrong. Two very different regimes produce gains. The **margin** and
+**guided** flows barely move anything (`move` = 0.026 and 0.014, flipping 1–15% of labels)
+and win by making a small number of correct, targeted corrections. The **probe-weight** flow
+moves features by 80% of their norm and wins on DINOv2 by sheer volume of flips — and the
+same aggressive transport on ResNet-18 moves features further than their own norm
+(`move` = 1.16), flips two thirds of all predictions and breaks 356 images. The magnitude of
+displacement is not what decides success; whether the target is aligned with the frozen
+decision rule is.
 
-<!-- Replace this section with the three-seed table from cell 6.8 before presenting. -->
+### How far the perturbation has to go
+
+Seed 0 only. The accuracy of the rolled-out objective is read against the amount of
+classifier error each $\sigma$ manufactures, from the same signal diagnostic.
+
+| $\sigma$ | Aircraft delta | Aircraft train acc | DTD delta | DTD train acc |
+| --- | --- | --- | --- | --- |
+| 0.5 | -0.0066 | 0.926 | -0.0048 | 1.000 |
+| 1.0 | +0.0033 | 0.464 | +0.0176 | 0.985 |
+| 1.5 | -0.0009 | 0.235 | +0.0229 | 0.904 |
+| 2.0 | +0.0030 | 0.127 | +0.0181 | 0.706 |
+| 3.0 | +0.0015 | 0.078 | **+0.0255** | 0.440 |
+
+The two cells behave in opposite ways, and the training accuracy column explains why. On
+DINOv2 the probe is so hard to perturb into error that even $\sigma = 3$ leaves it 44%
+correct, and accuracy keeps improving with more noise — the perturbation is still buying
+signal. On ResNet-18 the probe is already at 46% at $\sigma = 1$ and 8% at $\sigma = 3$, so
+past $\sigma \approx 1$ the "errors" are no longer informative corrections but noise, and
+the gain flattens out. Given that `rolled_ce_T12_n1` failed to replicate, these single-seed
+numbers are a direction to pursue rather than a result.
 
 ### Training behaviour
 
@@ -227,9 +268,42 @@ to the extension rather than to the frozen-classifier comparison.
 
 The brief fixes one training-set size for the main experiments, but the amount of training
 data turns out to be the variable that decides whether the FM layer can help at all, so the
-same comparison is repeated with the full training split.
+same four methods were rerun on the full training split, same seeds, same $T$.
 
-<!-- Paste the output of `markdown_main_table(full_table)` from cell 7.1 here. -->
+| Dataset | Encoder | Method | Top-1 accuracy | Delta vs probe |
+| --- | --- | --- | --- | --- |
+| FGVC-Aircraft | ResNet-18 | Stage 1 linear probe (frozen) | 0.3662 +/- 0.0027 | - |
+| FGVC-Aircraft | ResNet-18 | End-to-end rolled-out (Strategy 1) | 0.3751 +/- 0.0011 | **+0.0089 +/- 0.0023 \*** |
+| FGVC-Aircraft | ResNet-18 | Classifier-guided FM (Strategy 2) | 0.3691 +/- 0.0042 | +0.0029 +/- 0.0036 |
+| FGVC-Aircraft | ResNet-18 | Classifier-guided FM, noised sources | 0.3712 +/- 0.0018 | **+0.0050 +/- 0.0023 \*** |
+| FGVC-Aircraft | ResNet-18 | Joint fine-tuning (extension) | 0.3772 +/- 0.0046 | **+0.0110 +/- 0.0048 \*** |
+| DTD | DINOv2 ViT-S/14 | Stage 1 linear probe (frozen) | 0.7637 +/- 0.0083 | - |
+| DTD | DINOv2 ViT-S/14 | End-to-end rolled-out (Strategy 1) | 0.7610 +/- 0.0083 | -0.0027 +/- 0.0157 |
+| DTD | DINOv2 ViT-S/14 | Classifier-guided FM (Strategy 2) | 0.7597 +/- 0.0020 | -0.0039 +/- 0.0077 |
+| DTD | DINOv2 ViT-S/14 | Classifier-guided FM, noised sources | 0.7635 +/- 0.0035 | -0.0002 +/- 0.0073 |
+| DTD | DINOv2 ViT-S/14 | Joint fine-tuning (extension) | 0.7597 +/- 0.0025 | -0.0039 +/- 0.0063 |
+
+**This is the strongest result in the study.** On Aircraft / ResNet-18 the plain rolled-out
+objective — the same Strategy 1 that *lost* $0.0119$ at $K = 10$ — now **gains
+$+0.0089 \pm 0.0023$, positive on all three seeds**, and the joint extension gains
+$+0.0110 \pm 0.0048$, also positive on all three. Strategy 1 swings by $+0.0208$ between the
+two training-set sizes, which is precisely what the saturation analysis predicts: with the
+full split the probe no longer memorises its training set, the classification loss is no
+longer zero, and the gradient the flow backpropagates finally carries information.
+
+DTD / DINOv2 shows no effect at $K = \text{full}$, and the reason is visible in the
+per-seed numbers: **all four methods are negative on seed 1 and mostly positive on seeds 0
+and 2**, and seed 1 is exactly the seed whose baseline probe is strongest (0.7729 against
+0.7569 and 0.7612). When the frozen probe is already near the ceiling of what a linear rule
+can extract from these features, there is no headroom for the flow to recover, and the
+variance across seeds ($\pm 0.0157$ for Strategy 1) swamps any effect.
+
+Taken with the $K = 10$ table, the pattern across the study is consistent: **the FM layer
+helps in proportion to how much the frozen probe is leaving on the table.** It helps most on
+the weak encoder with plenty of data (Aircraft / ResNet-18 at $K = \text{full}$, 37%
+accuracy), not at all on the strong encoder near its linear ceiling (DTD / DINOv2 at
+$K = \text{full}$, 76%), and only with a carefully chosen target in the few-shot regime
+where the classifier supplies no gradient at all.
 
 ![Accuracy vs K, Aircraft / ResNet-18](../results/figures/stage3_accuracy_vs_k_aircraft_resnet18.png)
 ![Accuracy vs K, DTD / DINOv2](../results/figures/stage3_accuracy_vs_k_dtd_dinov2_vits14.png)
@@ -286,7 +360,8 @@ optimised it jointly with the FM transformation (`rolled_ce_T12_joint`). The cla
 trained on a private copy, so the frozen Stage 1 probe used as the baseline is never
 modified.
 
-<!-- The joint rows are also part of the main table above. -->
+The joint rows also appear in the main tables above; they are repeated here against the
+frozen-classifier row so the extension can be read on its own.
 
 | Dataset | Encoder | Method | Top-1 accuracy | Delta vs probe |
 | --- | --- | --- | --- | --- |
@@ -299,48 +374,63 @@ modified.
 ![Dynamics, joint, DTD / DINOv2](../results/figures/viz_rolled_ce_T12_joint_dtd_dinov2_vits14_k10_seed0.png)
 
 Unfreezing the classifier is marginally *better* than keeping it frozen under the same
-rolled-out objective ($+0.0026$ on Aircraft, $+0.0047$ on DTD), but both stay below the
-Stage 1 probe and neither difference clears its own spread. The honest reading is that the
-extension changes nothing at this training-set size, which is consistent with the diagnosis
-above: the bottleneck is the absence of a useful classification gradient, and adding
-trainable classifier parameters does not create one.
+rolled-out objective ($+0.0026$ on Aircraft, $+0.0047$ on DTD), but at $K = 10$ both stay
+below the Stage 1 probe and neither difference clears its own spread. The bottleneck at this
+training-set size is the absence of a useful classification gradient, and adding trainable
+classifier parameters does not create one.
 
-This also rules out the more intuitive "it overfits harder" explanation. At $K = 10$ the
-*frozen* probe is already at 100% training accuracy, so there is no additional memorisation
-left for the joint variant to exploit — which is why unfreezing neither helps nor hurts much.
-The training-accuracy curve now logged in the dynamics figures is the direct check.
+This also rules out the intuitive "it overfits harder" explanation. At $K = 10$ the *frozen*
+probe is already at 100% training accuracy, so there is no additional memorisation left for
+the joint variant to exploit — which is why unfreezing neither helps nor hurts much. The
+training-accuracy curve now logged in the dynamics figures is the direct check.
+
+**At $K = \text{full}$ the extension does pay off**, and it is the best configuration in the
+whole study on Aircraft / ResNet-18: $+0.0110 \pm 0.0048$, positive on all three seeds,
+against $+0.0089$ for the frozen classifier under the same objective. Once the classifier
+has enough data to provide a real gradient, letting the decision boundary co-adapt with the
+transported features adds a further small gain. On DTD / DINOv2 it is $-0.0039 \pm 0.0063$,
+i.e. no effect, consistent with every other method on that cell.
 
 ---
 
 ## Conclusions
 
-1. **At $K = 10$, neither strategy changes the frozen linear probe by a statistically
-   supported amount.** No delta in the main table clears twice its paired standard
-   deviation over three seeds. The signs are nonetheless consistent: the rolled-out
-   objective and the joint extension are negative on 5 of 6 runs each, the classifier-guided
-   objective is non-negative on 5 of 6.
-2. **We can say precisely why.** Both strategies read the same signal — the gradient of the
-   classification loss at the training features — and at $K = 10$ the frozen probe is at
-   100% training accuracy with a cross-entropy of $1.8\times10^{-3}$ (DINOv2) to
-   $2.2\times10^{-2}$ (ResNet-18). One classifier-guided target step consequently moves a
-   feature by $3.6\times10^{-6}$ of its norm on DINOv2. The flow is not failing to
-   optimise; it is being asked to learn from a gradient that is numerically zero, and a
-   field initialised at the identity correctly stays there.
-3. **The two strategies fail differently.** Strategy 2 collapses to the identity, which is
-   harmless — its deltas cluster at zero. Strategy 1 keeps a usable gradient only in the
-   directions that sharpen already-correct training points, so it moves the representation
-   and loses accuracy. The brief's own suggested remedy fixes this: penalising displacement
-   or velocity beats the unregularised objective in all eight comparisons.
-4. **The failure is a property of the data regime, and it can be escaped.** Perturbing the
-   sources hard enough to manufacture genuine classifier errors ($\sigma = 1.0$) produces
-   the only clear gain in the study, $+0.0176$ on DTD/DINOv2, with diagnostics showing real
-   transport: features move 30% of their norm and 86 test images are fixed against 53
-   broken. This supports the interpretation in (2) rather than contradicting it — the flow
-   helps exactly when the classifier is given something to be wrong about.
-5. **Joint fine-tuning does not rescue the frozen-classifier result** ($-0.0093$ Aircraft,
-   $-0.0029$ DTD). Adding trainable classifier parameters in a regime whose bottleneck is
-   the absence of training signal increases capacity where it cannot help.
+1. **At $K = 10$ the two strategies as literally specified do not beat the frozen probe.**
+   No delta in the main table clears twice its paired standard deviation. The signs are
+   consistent: the rolled-out objective is negative on 5 of 6 runs, the classifier-guided
+   objective non-negative on 5 of 6.
+2. **We can say precisely why, and the measurement is the main contribution.** Both
+   strategies read one signal — $\nabla_{\hat z}\,\mathrm{CE}$ at the training features —
+   and at $K = 10$ the frozen probe is at **100% training accuracy** with a cross-entropy of
+   $1.8\times10^{-3}$ (DINOv2). One classifier-guided step consequently moves a feature by
+   $3.6\times10^{-6}$ of its norm. The flow is not failing to optimise; it is being asked to
+   learn from a gradient that is numerically zero, and a field initialised at the identity
+   correctly stays there.
+3. **The prediction that follows from (2) is confirmed at $K = \text{full}$.** On
+   Aircraft / ResNet-18, where the probe no longer memorises its training set, the *same*
+   Strategy 1 that lost $0.0119$ at $K = 10$ gains $+0.0089 \pm 0.0023$, positive on all
+   three seeds — a swing of $+0.0208$ driven purely by the amount of training data. The
+   joint extension gains $+0.0110 \pm 0.0048$.
+4. **In the few-shot regime the fix is to stop depending on that gradient.** Four
+   configurations beat the probe by more than twice their spread at $K = 10$: the
+   displacement-regularised rolled-out objective ($+0.0096$, Aircraft), the margin target
+   ($+0.0075$, Aircraft), the probe-weight target ($+0.0094$, DINOv2) and a larger guided
+   step ($+0.0021$, DINOv2). The first is the brief's own suggested remedy; the middle two
+   never read the classification gradient at all.
+5. **Alignment with the frozen decision rule matters more than how far features move.** The
+   probe-weight target is significantly positive on DINOv2 ($+0.0094$) and significantly
+   negative on ResNet-18 ($-0.0339$) — the same objective, opposite signs. The diagnostics
+   show why: on ResNet-18 it displaces features by 1.16x their own norm, flips two thirds of
+   all predictions and breaks 356 test images. The winning flows on Aircraft move features
+   by only 0.03x their norm and win by making few, targeted corrections.
+6. **The FM layer helps in proportion to the headroom the frozen probe leaves.** Largest
+   gains on the weak encoder with plenty of data (Aircraft / ResNet-18, 37% accuracy); none
+   on the strong encoder near its linear ceiling (DTD / DINOv2 at $K = \text{full}$, 76%,
+   where every method is negative on the seed with the strongest baseline).
 
-**Caveat.** Points 3 and 4 rest on single-seed runs and are reported as leads. The
-three-seed confirmation of the surviving configurations is the remaining work.
+**Methodological note.** Sixteen configurations were screened on a single seed and the best
+of them, $+0.0176$ on DTD, **failed to replicate** ($+0.0067 \pm 0.0097$ over three seeds).
+Every number presented as a result here is a three-seed mean with a paired standard
+deviation, and the starred rows should still be read with the number of configurations
+screened in mind.
 
