@@ -10,9 +10,9 @@ from src.fmlayer.viz.curves import plot_representative_curves
 from src.fmlayer.viz.embeddings import plot_embeddings_for_dataset
 
 TABLE_FILENAME = "accuracy_table.csv"
-# ``steps`` is blank for Stage 1 rows and carries T for the flow rows, so the two
-# inference budgets of one flow never get averaged together.
-GROUP_COLUMNS = ("method", "dataset", "encoder", "k", "steps")
+# ``steps`` and ``t`` are constant for every stage 1 method, so they only split rows for
+# later stages that sweep the Euler step count or the integration time.
+GROUP_COLUMNS = ("method", "dataset", "encoder", "k", "steps", "t")
 # Training-set size is a protocol order, not an alphabetical one.
 K_SORT_ORDER = {"5": 0, "10": 1, "full": 2, "none": 3}
 

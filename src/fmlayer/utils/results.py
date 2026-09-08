@@ -13,14 +13,29 @@ RUNS_COLUMNS = (
     "k",
     "seed",
     "steps",
+    "t",
     "split",
     "accuracy",
     "num_items",
     "timestamp",
 )
 # A run is uniquely identified by these fields; re-running replaces the old row.
-# ``steps`` is part of the identity so the T=4 and T=12 rows of one flow coexist.
-IDENTITY_COLUMNS = ("method", "dataset", "encoder", "k", "seed", "steps", "split")
+# ``steps`` is the number of Euler steps T, ``t`` the flow-matching integration time;
+# methods without either record NO_VALUE.
+IDENTITY_COLUMNS = ("method", "dataset", "encoder", "k", "seed", "steps", "t", "split")
+NO_VALUE = "none"
+
+
+def normalize_row(row: dict) -> dict:
+    """Fill in any column a CSV written by an earlier schema predates.
+
+    Args:
+        row: A row read from ``runs.csv``.
+
+    Returns:
+        The row with every column of :data:`RUNS_COLUMNS` present.
+    """
+    return {column: row.get(column, NO_VALUE) for column in RUNS_COLUMNS}
 
 
 def default_results_root() -> Path:
@@ -63,7 +78,7 @@ def load_runs(results_root: Path | None = None) -> list[dict]:
     if not path.is_file():
         return []
     with path.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+        return [normalize_row(row) for row in csv.DictReader(handle)]
 
 
 def record_run(row: dict, results_root: Path | None = None) -> Path:
@@ -76,7 +91,7 @@ def record_run(row: dict, results_root: Path | None = None) -> Path:
     Returns:
         Path of the rewritten ``runs.csv``.
     """
-    entry = {column: "" for column in RUNS_COLUMNS}
+    entry = {column: NO_VALUE for column in RUNS_COLUMNS}
     entry.update({key: value for key, value in row.items() if key in RUNS_COLUMNS})
     entry["timestamp"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 

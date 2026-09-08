@@ -233,6 +233,7 @@ extract_pdf.py
 # docs/ is private except the per-stage result write-ups and their figures
 docs/*
 !docs/stage1.md
+!docs/stage2.md
 !docs/figures/
 
 myenv
