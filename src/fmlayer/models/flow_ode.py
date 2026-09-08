@@ -41,6 +41,25 @@ def rollout(model: nn.Module, x_init: Tensor, steps: int) -> tuple[Tensor, Tenso
 
 
 @torch.no_grad()
+def transport(model: nn.Module, features: Tensor, steps: int) -> Tensor:
+    """Run the flow without gradients, returning only the transported features.
+
+    Args:
+        model: The velocity field.
+        features: Features to transport.
+        steps: Number of Euler steps; ``0`` leaves the features untouched.
+
+    Returns:
+        The transported features.
+    """
+    if steps < 1:
+        return features
+    model.eval()
+    final, _ = rollout(model, features, steps)
+    return final
+
+
+@torch.no_grad()
 def rollout_trajectory(model: nn.Module, features: Tensor, steps: int) -> Tensor:
     """Run :func:`rollout` for inspection, without building a graph.
 

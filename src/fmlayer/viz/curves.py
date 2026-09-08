@@ -37,7 +37,7 @@ def plot_combined_curves(
     """Plot representative loss and accuracy training curves together in a combined figure."""
     apply_plot_style()
     cells = cells if cells is not None else LINEAR_PROBE_CELLS
-    fig, axes = plt.subplots(2, len(cells), figsize=(4.8 * len(cells), 7.5))
+    fig, axes = plt.subplots(2, len(cells), figsize=(3.5 * len(cells), 5.5))
 
     for i, (encoder, dataset) in enumerate(cells):
         run = load_history(encoder, dataset, k, seed, results_root)
@@ -96,7 +96,7 @@ def plot_curves(
     main_color = ENCODER_COLORS.get(encoder, "#1f77b4")
     label = ENCODER_LABELS.get(encoder, encoder)
 
-    fig, (loss_ax, acc_ax) = plt.subplots(1, 2, figsize=(11, 4.2))
+    fig, (loss_ax, acc_ax) = plt.subplots(1, 2, figsize=(8.5, 3.5))
 
     loss_ax.plot(epochs, train_loss, color=main_color, linewidth=2, label="Train Loss")
     loss_ax.plot(epochs, val_loss, color="#dc2626", linewidth=2, linestyle="--", label="Val Loss")

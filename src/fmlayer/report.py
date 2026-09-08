@@ -33,6 +33,11 @@ def accuracy_table(results_root: Path | None = None) -> pd.DataFrame:
 
     frame = pd.DataFrame(runs)
     frame["accuracy"] = frame["accuracy"].astype(float)
+    # A runs.csv written before the column existed has no ``steps`` at all.
+    for column in GROUP_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+        frame[column] = frame[column].fillna("")
 
     table = (
         frame.groupby(list(GROUP_COLUMNS))["accuracy"]

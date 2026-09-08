@@ -50,6 +50,22 @@ Headline: +26.6 points on DTD (0.4005 → 0.6668) and +17.5 points on FGVC-Aircr
 (0.1545 → 0.3299) over the zero-shot baseline, with the encoder and the prototypes both frozen.
 Both come from rolled-out FM at T = 4, K = full.
 
+## Stage 3 — Flow Matching Before a Linear Probe
+
+In Stage 3, we introduce a generative **Flow Matching (FM)** vector field $v_\theta(z, t)$ that acts as a trainable structural layer *before* a classification probe. Instead of mapping images directly to text prototypes, we use Flow Matching to physically reshape the embedding manifold, pulling same-class features together and pushing different classes apart. The transported embeddings are then classified by a frozen linear probe.
+
+We evaluate three distinct mathematical objectives:
+- `standard`: A straight conditional-OT path from features to a target point.
+- `rolled_mse`: Backpropagating through the unrolled ODE solver to hit a geometric target.
+- `rolled_ce`: Backpropagating through the ODE solver and the frozen linear probe using classification Cross-Entropy.
+
+For the geometric targets (`standard` and `rolled_mse`), we evaluate:
+- `centroids`: Class mean features.
+- `probe_weights`: Optimal classification directions from the linear probe.
+- `orthogonal`: Random maximally separated orthogonal vectors.
+
+Detailed results and ablation analysis are documented in `docs/stage3.md`.
+
 ---
 
 ## What is implemented
