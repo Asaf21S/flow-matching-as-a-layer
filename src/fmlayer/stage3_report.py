@@ -11,14 +11,164 @@ from src.fmlayer.features.cache import load_split
 from src.fmlayer.models.probe_bank import ProbeBank
 from src.fmlayer.models.targets import ClassTargets, build_target_provider
 from src.fmlayer.train.diagnostics import diagnose_all, print_diagnostics
+from src.fmlayer.train.train_fm import MAIN_K, MAIN_STEPS, main_configs
 from src.fmlayer.train.train_linear import to_tensors
 from src.fmlayer.utils.results import default_results_root
 from src.fmlayer.viz.flow_viz import plot_feature_comparison, plot_flow_dynamics
-from src.fmlayer.viz.stage3_charts import plot_accuracy_vs_k, plot_config_ablation
+from src.fmlayer.viz.stage3_charts import (
+    plot_accuracy_vs_k,
+    plot_config_ablation,
+    plot_curve_comparison,
+)
 
 TABLE_FILENAME = "stage3_table.csv"
+MAIN_TABLE_FILENAME = "stage3_main.csv"
 GROUP_COLUMNS = ("encoder", "dataset", "k", "config_name", "objective", "target_type", "steps")
 K_SORT_ORDER = {"5": 0, "10": 1, K_FULL: 2}
+BASELINE_LABEL = "Stage 1 linear probe (frozen)"
+
+MAIN_METHOD_LABELS = (
+    "End-to-end rolled-out (Strategy 1)",
+    "Classifier-guided FM (Strategy 2)",
+    "Classifier-guided FM, noised sources",
+    "Joint fine-tuning (extension)",
+)
+
+
+def main_labels(train_steps: int = MAIN_STEPS) -> dict[str, str]:
+    """Map each main configuration's tag onto the name used in the write-up.
+
+    Derived from :func:`main_configs` so a renamed configuration can never fall out of
+    the table silently.
+    """
+    names = [config.name for config in main_configs(train_steps)]
+    return dict(zip(names, MAIN_METHOD_LABELS))
+
+
+def main_comparison_table(
+    results: dict,
+    k: int | str = MAIN_K,
+    steps: int = MAIN_STEPS,
+    labels: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Build the headline table: the frozen probe against each Stage 3 method.
+
+    The delta is paired per seed, because every run is scored against the probe of its
+    own seed, so its spread is the right error bar rather than the spread of accuracy.
+
+    Args:
+        results: Output of :func:`run_stage3_main` or :func:`load_stage3_results`.
+        k: Training-set size to report.
+        steps: The single T Stage 3 fixed.
+        labels: Tag to display-name mapping; defaults to :func:`main_labels`.
+
+    Returns:
+        One row per cell and method, with the baseline as the first row of each cell.
+    """
+    labels = labels if labels is not None else main_labels(steps)
+    records = []
+    for result in results.values():
+        if str(result["k"]) != str(k) or steps not in result["accuracy_by_steps"]:
+            continue
+        records.append(
+            {
+                "dataset": result["dataset"],
+                "encoder": result["encoder"],
+                "config_name": result["config_name"],
+                "seed": result["seed"],
+                "accuracy": result["accuracy_by_steps"][steps],
+                "baseline": result["baseline_accuracy"],
+            }
+        )
+    if not records:
+        raise ValueError(f"No Stage 3 results at K={k}, T={steps} to aggregate.")
+
+    frame = pd.DataFrame(records)
+    frame["run_delta"] = frame["accuracy"] - frame["baseline"]
+
+    rows = []
+    for (dataset, encoder), group in frame.groupby(["dataset", "encoder"], sort=True):
+        baseline = group.groupby("seed")["baseline"].first()
+        rows.append(
+            {
+                "dataset": dataset,
+                "encoder": encoder,
+                "method": BASELINE_LABEL,
+                "config_name": "",
+                "steps": "-",
+                "seeds": int(len(baseline)),
+                "acc_mean": float(baseline.mean()),
+                "acc_std": float(baseline.std(ddof=1)) if len(baseline) > 1 else 0.0,
+                "delta": float("nan"),
+                "delta_std": float("nan"),
+                "significant": False,
+            }
+        )
+        for name, label in labels.items():
+            subset = group[group["config_name"] == name]
+            if subset.empty:
+                continue
+            spread = float(subset["run_delta"].std(ddof=1)) if len(subset) > 1 else 0.0
+            delta = float(subset["run_delta"].mean())
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "encoder": encoder,
+                    "method": label,
+                    "config_name": name,
+                    "steps": steps,
+                    "seeds": int(len(subset)),
+                    "acc_mean": float(subset["accuracy"].mean()),
+                    "acc_std": float(subset["accuracy"].std(ddof=1)) if len(subset) > 1 else 0.0,
+                    "delta": delta,
+                    "delta_std": spread,
+                    "significant": bool(abs(delta) > 2 * spread > 0),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def markdown_main_table(table: pd.DataFrame) -> str:
+    """Render :func:`main_comparison_table` as a markdown table for the write-up.
+
+    Args:
+        table: Output of :func:`main_comparison_table`.
+
+    Returns:
+        A markdown string, ready to paste into ``docs/stage3.md``.
+    """
+    lines = [
+        "| Dataset | Encoder | Method | Top-1 accuracy | Delta vs probe |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for _, row in table.iterrows():
+        display = get_spec(row["dataset"]).display_name
+        accuracy = f"{row['acc_mean']:.4f}"
+        if row["seeds"] > 1:
+            accuracy += f" +/- {row['acc_std']:.4f}"
+        if pd.isna(row["delta"]):
+            delta = "-"
+        else:
+            delta = f"{row['delta']:+.4f}"
+            if row["seeds"] > 1:
+                delta += f" +/- {row['delta_std']:.4f}"
+            if row["significant"]:
+                delta += " *"
+        lines.append(
+            f"| {display} | {row['encoder']} | {row['method']} | {accuracy} | {delta} |"
+        )
+    lines.append("")
+    lines.append("`*` marks a delta larger than twice its paired standard deviation across seeds.")
+    return "\n".join(lines)
+
+
+def save_main_table(table: pd.DataFrame, results_root: Path | None = None) -> Path:
+    """Write the headline table, baselines included, next to ``runs.csv``."""
+    root = Path(results_root) if results_root is not None else default_results_root()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / MAIN_TABLE_FILENAME
+    table.to_csv(path, index=False)
+    return path
 
 
 def stage3_table(results: dict) -> pd.DataFrame:
@@ -163,12 +313,104 @@ def target_table_for_run(
         return provider.table.cpu().numpy()
 
 
+def make_stage3_main_figures(
+    results: dict,
+    k: int | str = MAIN_K,
+    seed: int = 0,
+    steps: int = MAIN_STEPS,
+    labels: dict[str, str] | None = None,
+    include_joint: bool = False,
+    feature_root: Path | None = None,
+    figures_root: Path | None = None,
+    show: bool = False,
+    save: bool = True,
+) -> dict:
+    """Render exactly the three deliverables the brief asks for, per cell.
+
+    Unlike :func:`make_stage3_figures`, nothing here is chosen by leaderboard position:
+    the methods drawn are the ones the comparison is defined over.
+
+    Args:
+        results: Output of :func:`run_stage3_main`.
+        k: Training-set size to visualise.
+        seed: Seed to visualise.
+        steps: The single T Stage 3 fixed; trajectories are drawn at this T only.
+        labels: Tag to display-name mapping; defaults to :func:`main_labels`.
+        include_joint: Also put the jointly fine-tuned flow in the before/after figure.
+        feature_root: Feature cache directory.
+        figures_root: Figure directory.
+        show: Display the figures.
+        save: Write PNGs.
+
+    Returns:
+        The paths of every figure written, grouped by kind.
+    """
+    labels = labels if labels is not None else main_labels(steps)
+    joint_names = {config.name for config in main_configs(steps) if config.joint_finetune}
+
+    cells = sorted({(result["encoder"], result["dataset"]) for result in results.values()})
+    curves_paths, dynamics_paths, comparison_paths = [], [], []
+
+    for encoder, dataset in cells:
+        available = {}
+        for name, label in labels.items():
+            result = results.get(f"{name}/{encoder}/{dataset}/{k}/{seed}")
+            if result is not None:
+                available[label] = result
+        if not available:
+            continue
+
+        val_features, val_labels, metadata = load_split(encoder, dataset, "val", feature_root)
+        class_names = metadata["class_names"]
+        baseline = next(iter(available.values()))["baseline_accuracy"]
+
+        curves_paths.append(
+            plot_curve_comparison(
+                available, dataset, encoder, baseline,
+                figures_root=figures_root, show=show, save=save,
+            )
+        )
+
+        for result in available.values():
+            dynamics_paths.append(
+                plot_flow_dynamics(
+                    result, val_features, val_labels, class_names,
+                    targets=target_table_for_run(result, feature_root),
+                    step_counts=(steps,), figures_root=figures_root, show=show, save=save,
+                )
+            )
+
+        fields = {
+            f"After {label}": result["fm_layer"]
+            for label, result in available.items()
+            if include_joint or result["config_name"] not in joint_names
+        }
+        test_features, test_labels, _ = load_split(encoder, dataset, "test", feature_root)
+        comparison_paths.append(
+            plot_feature_comparison(
+                fields, test_features, test_labels, class_names, dataset, encoder,
+                steps=steps, figures_root=figures_root, show=show, save=save,
+            )
+        )
+
+    written = [path for path in curves_paths + dynamics_paths + comparison_paths if path is not None]
+    print(f"\n{len(written)} figure(s) written:")
+    for path in written:
+        print(f"  {path}")
+    return {
+        "curve_figures": curves_paths,
+        "dynamics_figures": dynamics_paths,
+        "comparison_figures": comparison_paths,
+    }
+
+
 def make_stage3_figures(
     results: dict,
     k: int | str = K_FULL,
     seed: int = 0,
     controls: tuple[str, ...] = ("standard_centroids",),
     steps: int = 12,
+    dynamics_steps: tuple[int, ...] | None = None,
     feature_root: Path | None = None,
     figures_root: Path | None = None,
     show: bool = False,
@@ -186,6 +428,7 @@ def make_stage3_figures(
         seed: Seed to visualise.
         controls: Configurations always drawn alongside the winner, for contrast.
         steps: Euler steps used in the before/after comparison.
+        dynamics_steps: Trajectory step counts; defaults to ``steps`` alone.
         feature_root: Feature cache directory.
         figures_root: Figure directory; defaults to ``<results>/figures``.
         show: Display the figures.
@@ -196,6 +439,7 @@ def make_stage3_figures(
     """
     table = stage3_table(results)
     at_k = table[table["k"].astype(str) == str(k)]
+    dynamics_steps = dynamics_steps if dynamics_steps is not None else (steps,)
     dynamics_paths = []
     comparison_paths = []
     chosen: dict[str, list[str]] = {}
@@ -217,7 +461,7 @@ def make_stage3_figures(
             dynamics_paths.append(
                 plot_flow_dynamics(
                     result, val_features, val_labels, class_names, targets=targets,
-                    figures_root=figures_root, show=show, save=save,
+                    step_counts=dynamics_steps, figures_root=figures_root, show=show, save=save,
                 )
             )
             fields[f"After {name}"] = result["fm_layer"]

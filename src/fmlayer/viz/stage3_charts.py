@@ -7,11 +7,80 @@ import pandas as pd
 from src.fmlayer.data.fewshot import K_FULL
 from src.fmlayer.data.specs import get_spec
 from src.fmlayer.viz.figures import apply_plot_style, save_figure
+from src.fmlayer.viz.flow_viz import curve_series
 
 K_ORDER = ("5", "10", K_FULL)
 POSITIVE_COLOR = "#2ca02c"
 NEGATIVE_COLOR = "#d62728"
 BASELINE_COLOR = "#333333"
+
+CURVE_PANELS = (
+    ("train_loss", "Training loss (own objective)", True),
+    ("val_accuracy", "Validation accuracy", False),
+    ("val_loss", "Validation cross-entropy", False),
+)
+
+
+def plot_curve_comparison(
+    runs: dict[str, dict],
+    dataset: str,
+    encoder: str,
+    baseline: float | None = None,
+    figures_root: Path | None = None,
+    show: bool = True,
+    save: bool = False,
+) -> Path | None:
+    """Training and validation curves of several Stage 3 methods, side by side.
+
+    The two methods minimise different quantities, so the left panel is only readable
+    within a method. The two right panels are the frozen classifier's own metrics and are
+    what the methods should be compared on.
+
+    Args:
+        runs: Display name to result, as returned by :func:`run_stage3`.
+        dataset: Dataset key, used for the title and the file name.
+        encoder: Encoder key.
+        baseline: Frozen-probe accuracy to draw as a reference line.
+        figures_root: Output directory.
+        show: Display the figure.
+        save: Write a PNG.
+
+    Returns:
+        Path of the saved figure, or ``None``.
+    """
+    apply_plot_style()
+    if not runs:
+        return None
+
+    fig, axes = plt.subplots(1, len(CURVE_PANELS), figsize=(5.2 * len(CURVE_PANELS), 4.2))
+    colors = plt.get_cmap("tab10")
+
+    for ax, (key, title, logarithmic) in zip(axes, CURVE_PANELS):
+        drawn = False
+        for index, (label, result) in enumerate(runs.items()):
+            epochs, values = curve_series(result["history"], key)
+            if not epochs:
+                continue
+            ax.plot(epochs, values, linewidth=1.9, color=colors(index % 10), label=label)
+            drawn = drawn or min(values) > 0
+        if key == "val_accuracy" and baseline is not None:
+            ax.axhline(
+                baseline, color=BASELINE_COLOR, linestyle="--", linewidth=2,
+                label=f"Frozen probe ({baseline:.4f})",
+            )
+        if logarithmic and drawn:
+            ax.set_yscale("log")
+        ax.set_xlabel("Epoch")
+        ax.set_title(title, pad=8)
+        ax.legend(loc="best", fontsize=8)
+
+    fig.suptitle(
+        f"{get_spec(dataset).display_name} ({encoder}): Stage 3 training behaviour",
+        fontsize=13,
+        y=1.02,
+    )
+    fig.tight_layout()
+    return save_figure(fig, f"stage3_curves_{dataset}_{encoder}", figures_root, show=show, save=save)
 
 
 def k_position(k: str) -> float:

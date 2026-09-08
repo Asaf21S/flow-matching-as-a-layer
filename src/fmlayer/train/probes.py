@@ -23,6 +23,26 @@ def freeze(probe: nn.Linear) -> nn.Linear:
     return probe
 
 
+def clone_probe(probe: nn.Linear) -> nn.Linear:
+    """Copy a probe, so a run that fine-tunes it cannot touch the cached original.
+
+    ``get_probe`` hands the same module to every configuration of a cell. Joint
+    fine-tuning writes the trained weights back into a probe, so it has to be given a
+    private copy or it silently replaces the frozen Stage 1 baseline of every later run.
+
+    Args:
+        probe: The probe to copy.
+
+    Returns:
+        A detached copy on the same device.
+    """
+    copy = build_linear_probe(
+        probe.in_features, probe.out_features, seed=0, device=probe.weight.device
+    )
+    copy.load_state_dict(probe.state_dict())
+    return freeze(copy)
+
+
 def probe_path(
     encoder: str, dataset: str, k: int | str, seed: int, suffix: str, results_root: Path | None = None
 ) -> Path:

@@ -82,31 +82,38 @@ def draw_targets(ax, target_xy: np.ndarray, class_ids: np.ndarray, colors) -> No
         )
 
 
+def curve_series(history: list[dict], key: str) -> tuple[list[int], list[float]]:
+    """Epochs and values of one logged metric, skipping the epochs that lack it."""
+    points = [(entry["epoch"], entry[key]) for entry in history if key in entry]
+    return [epoch for epoch, _ in points], [value for _, value in points]
+
+
 def draw_training_curves(ax, history: list[dict], title: str) -> None:
-    """Plot the training loss with the validation accuracy on a twin axis."""
-    epochs = [entry["epoch"] for entry in history]
-    losses = [entry["train_loss"] for entry in history]
+    """Plot the training loss with the train and validation accuracy on a twin axis."""
+    epochs, losses = curve_series(history, "train_loss")
     ax.plot(epochs, losses, color="#1f77b4", linewidth=2, label="train loss")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Training loss", color="#1f77b4")
     ax.tick_params(axis="y", labelcolor="#1f77b4")
-    if min(losses) > 0:
+    if losses and min(losses) > 0:
         ax.set_yscale("log")
 
-    validated = [entry for entry in history if "val_accuracy" in entry]
-    if validated:
+    val_epochs, val_accuracy = curve_series(history, "val_accuracy")
+    if val_epochs:
         twin = ax.twinx()
-        twin.plot(
-            [entry["epoch"] for entry in validated],
-            [entry["val_accuracy"] for entry in validated],
-            color="#d62728",
-            linewidth=2,
-            label="val accuracy",
-        )
-        twin.set_ylabel("Val accuracy", color="#d62728")
+        twin.plot(val_epochs, val_accuracy, color="#d62728", linewidth=2, label="val accuracy")
+        train_epochs, train_accuracy = curve_series(history, "train_accuracy")
+        if train_epochs:
+            twin.plot(
+                train_epochs, train_accuracy, color="#d62728", linewidth=1.6,
+                linestyle="--", alpha=0.8, label="train accuracy",
+            )
+        twin.set_ylabel("Accuracy", color="#d62728")
         twin.tick_params(axis="y", labelcolor="#d62728")
         twin.grid(False)
+        twin.legend(loc="lower right", fontsize=8)
     ax.set_title(title, pad=8)
+
 
 
 def draw_vector_field(
