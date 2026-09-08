@@ -20,7 +20,6 @@ optimiser. The FM layer is initialised at the **exact identity** — the output 
 the velocity network is zero-initialised, so $v_\theta \equiv 0$ and $\hat{z} = z$ before
 any Stage 3 training. The complete system therefore starts out numerically identical to
 the Stage 1 linear probe, and every reported change is caused by Stage 3 training alone.
-Both properties are asserted by the component checks in `src/fmlayer/train/checks.py`.
 
 **Data.** The same splits and the same sampled training subsets as the Stage 1 linear-probe
 experiments; the subset index files are reused from the cache, keyed by
@@ -68,8 +67,6 @@ deviation $0.15$ of the mean feature norm. Every knob that changes the trained m
 appears in the tag, so no two variants can share a checkpoint.
 
 ## Deviations from the suggested recipes
-
-The brief asks that substantial changes be described and justified experimentally.
 
 1. **Noise-perturbed sources for the guided method.** At $K = 10$ the frozen probe has
    essentially zero training error, so on the training features themselves the
@@ -122,16 +119,16 @@ increasing source perturbation $\sigma$ (as a fraction of the mean feature norm)
 `step/|z|` is the fraction of its own norm that one classifier-guided target step moves a
 feature.
 
-| Cell | $\sigma$ | Train acc | Train CE | mean $\lVert\nabla\rVert$ | step/$\lVert z\rVert$ |
-| --- | --- | --- | --- | --- | --- |
-| Aircraft / ResNet-18 | 0.00 | 1.0000 | 2.22e-02 | 7.41e-02 | 2.63e-04 |
-| Aircraft / ResNet-18 | 0.30 | 0.9990 | 8.21e-02 | 2.57e-01 | 8.71e-04 |
-| Aircraft / ResNet-18 | 0.50 | 0.8960 | 3.58e-01 | 7.57e-01 | 2.38e-03 |
-| Aircraft / ResNet-18 | 1.00 | 0.4770 | 2.57e+00 | 2.30e+00 | 5.64e-03 |
-| DTD / DINOv2 | 0.00 | 1.0000 | 1.75e-03 | 1.73e-03 | 3.62e-06 |
-| DTD / DINOv2 | 0.30 | 1.0000 | 2.83e-03 | 2.89e-03 | 5.78e-06 |
-| DTD / DINOv2 | 0.50 | 1.0000 | 4.64e-03 | 4.68e-03 | 8.74e-06 |
-| DTD / DINOv2 | 1.00 | 0.9894 | 5.48e-02 | 4.41e-02 | 6.60e-05 |
+| Cell | $\sigma$ | Train acc | Train CE | mean $\lVert\nabla\rVert$ | step / \|z\| |
+| --- | --- | --- | --- | --- |--------------|
+| Aircraft / ResNet-18 | 0.00 | 1.0000 | 2.22e-02 | 7.41e-02 | 2.63e-04     |
+| Aircraft / ResNet-18 | 0.30 | 0.9990 | 8.21e-02 | 2.57e-01 | 8.71e-04     |
+| Aircraft / ResNet-18 | 0.50 | 0.8960 | 3.58e-01 | 7.57e-01 | 2.38e-03     |
+| Aircraft / ResNet-18 | 1.00 | 0.4770 | 2.57e+00 | 2.30e+00 | 5.64e-03     |
+| DTD / DINOv2 | 0.00 | 1.0000 | 1.75e-03 | 1.73e-03 | 3.62e-06     |
+| DTD / DINOv2 | 0.30 | 1.0000 | 2.83e-03 | 2.89e-03 | 5.78e-06     |
+| DTD / DINOv2 | 0.50 | 1.0000 | 4.64e-03 | 4.68e-03 | 8.74e-06     |
+| DTD / DINOv2 | 1.00 | 0.9894 | 5.48e-02 | 4.41e-02 | 6.60e-05     |
 
 The probe is at **100% training accuracy on both cells**, and one guided step moves a DTD
 feature by $3.6\times10^{-6}$ of its norm — numerically indistinguishable from not moving
@@ -175,32 +172,11 @@ structure is interpretable rather than random:
 - **A larger guided step is a small but very consistent gain on DINOv2**
   ($+0.0016, +0.0021, +0.0027$ across the three seeds).
 
-**A caution, and a lesson.** The single best seed-0 result, `rolled_ce_T12_n1` at $+0.0176$
+The single best seed-0 result, `rolled_ce_T12_n1` at $+0.0176$
 on DTD, **did not replicate**: over three seeds it is $+0.0067 \pm 0.0097$
 ($+0.0176, -0.0011, +0.0037$). Sixteen configurations were screened on one seed, so at least
 one large-looking number was expected by chance. This is the reason nothing is reported from
-a single seed, and it is worth stating explicitly in the presentation.
-
-The flow diagnostics confirm the surviving gains are real transport rather than luck:
-
-| Cell | Configuration | Delta | move | flip% | fixed | broken | net |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Aircraft / RN18 | `rolled_ce_T12_vl1` | +0.0219 | 0.057 | 27.1% | 151 | 78 | +73 |
-| Aircraft / RN18 | `rolled_ce_T12_dl0p1` | +0.0120 | 0.112 | 35.7% | 176 | 136 | +40 |
-| Aircraft / RN18 | `standard_margin_n0p15` | +0.0096 | 0.026 | 15.5% | 84 | 52 | +32 |
-| DTD / DINOv2 | `rolled_mse_probe_weights_T12` | +0.0117 | 0.821 | 14.1% | 84 | 62 | +22 |
-| DTD / DINOv2 | `standard_guided_T12_s1lr1` | +0.0027 | 0.014 | 1.0% | 8 | 3 | +5 |
-| Aircraft / RN18 | `rolled_mse_probe_weights_T12` | -0.0366 | 1.161 | 66.3% | 234 | 356 | -122 |
-
-`move` is the mean relative displacement, `fixed` counts wrong-to-right label flips and
-`broken` right-to-wrong. Two very different regimes produce gains. The **margin** and
-**guided** flows barely move anything (`move` = 0.026 and 0.014, flipping 1–15% of labels)
-and win by making a small number of correct, targeted corrections. The **probe-weight** flow
-moves features by 80% of their norm and wins on DINOv2 by sheer volume of flips — and the
-same aggressive transport on ResNet-18 moves features further than their own norm
-(`move` = 1.16), flips two thirds of all predictions and breaks 356 images. The magnitude of
-displacement is not what decides success; whether the target is aligned with the frozen
-decision rule is.
+a single seed.
 
 ### How far the perturbation has to go
 
@@ -308,7 +284,7 @@ where the classifier supplies no gradient at all.
 ![Accuracy vs K, Aircraft / ResNet-18](../results/figures/stage3_accuracy_vs_k_aircraft_resnet18.png)
 ![Accuracy vs K, DTD / DINOv2](../results/figures/stage3_accuracy_vs_k_dtd_dinov2_vits14.png)
 
-### Ablations requested by the brief
+### Targeted sensitivity checks
 
 **Strategy 1 — regularising the transformation.** Penalising the displacement
 $\lVert \hat{z} - z \rVert^2$ or the magnitude of the predicted velocities, both normalised
