@@ -1,189 +1,73 @@
 # flow-matching-as-a-layer
 
-Implementation of generative Flow Matching (FM) as a structural layer within image
-classification networks.
+Generative **Flow Matching (FM)** repurposed as a trainable structural layer inside an image
+classifier.
 
-The project is built in stages. **Stage 1** establishes the frozen-encoder classification
-baselines and contains no flow matching; **Stage 2** adds the flow-matching layer itself and is
-compared against those baselines.
+## Executive summary
 
-Results write-ups: [`docs/stage1.md`](docs/stage1.md) · [`docs/stage2.md`](docs/stage2.md).
+Flow Matching is normally a *generative* tool: it learns a velocity field $v_\theta(z,t)$ that
+transports one distribution into another. This project asks whether that same machinery can be
+made *discriminative* — whether a learned ODE, applied to a frozen encoder's embedding, can
+reshape the feature manifold into one an existing classifier handles better.
 
----
+Everything upstream of the flow stays frozen: the encoder, and (in Stage 3) the classifier. The
+FM layer is initialised at the exact identity, so any change in accuracy is caused by the flow
+alone.
 
-## Stage 1 — Classification baselines
+- **Stage 1** — frozen-encoder baselines (linear probe, zero-shot CLIP). No flow matching.
+- **Stage 2** — FM transports a CLIP image embedding onto the CLIP **text** prototype of its
+  class; classification is cosine 1-NN. Large gains.
+- **Stage 3** — FM inserted **before a frozen linear probe**. Small but statistically supported
+  gains, plus a measurement of *when* the layer can help at all.
 
-A reproducible classification pipeline on frozen pretrained encoders. Features are extracted
-once and cached; every classifier then trains and evaluates on those cached vectors.
+**Setup:** DTD (47 classes) and FGVC-Aircraft (100 classes) · ResNet-18 / DINOv2 ViT-S/14 /
+CLIP RN50 · K ∈ {5, 10, full} shots × seeds {0, 1, 2} · top-1 on the official test split.
 
-| | |
-|---|---|
-| **Datasets** | DTD (official partition 1, 47 classes) · FGVC-Aircraft (variant level, 100 classes) |
-| **Encoders** | ResNet-18 (ImageNet-1K, 512-d) · DINOv2 ViT-S/14 (384-d) · CLIP RN50 (1024-d) |
-| **Baseline 1** | Linear probe — 3 encoder/dataset cells × K ∈ {5, 10, full} × 3 seeds = **27 runs** |
-| **Baseline 2** | Zero-shot CLIP with text prototypes — **2 runs**, no labelled training images |
-| **Metric** | Top-1 accuracy on the complete official test split |
+## Consolidated results
 
-Protocol rules enforced in code: encoders stay frozen, official splits are never merged,
-validation is used only for model selection, the test split only for the final number, and
-K-shot subsets are balanced per class and shared across encoders.
+### Stage 1 — baselines (top-1, K = full)
 
----
+| Dataset | Encoder | Linear probe | Zero-shot CLIP RN50 |
+| --- | --- | --- | --- |
+| DTD | ResNet-18 | 0.6284 ± 0.0045 | 0.4005 |
+| DTD | DINOv2 ViT-S/14 | **0.7637 ± 0.0083** | 0.4005 |
+| FGVC-Aircraft | ResNet-18 | **0.3662 ± 0.0027** | 0.1545 |
 
-## Stage 2 — Flow matching as a layer
+### Stage 2 — zero-shot CLIP + FM (best: rolled-out, T = 4, K = full)
 
-A small velocity field `v(z, t)` transports a frozen CLIP image embedding onto the frozen CLIP
-**text** prototype of its class. At inference the field is applied to an unlabelled embedding
-for T Euler steps, and the transported embedding is classified with the same cosine 1-NN rule
-as the Stage 1 zero-shot baseline. The field never sees a label, which is what makes it
-applicable at test time.
+| Dataset | Zero-shot baseline | + FM layer | Δ |
+| --- | --- | --- | --- |
+| DTD | 0.4005 | **0.6668 ± 0.0011** | **+0.2663** |
+| FGVC-Aircraft | 0.1545 | **0.3299 ± 0.0034** | **+0.1754** |
 
-| | |
-|---|---|
-| **Objective 1** | Standard FM — `L = ‖v(z_t, t) − (p_y − z_i)‖²` on the straight conditional-OT path |
-| **Objective 2** | Rolled-out FM — `L = ‖z_T − p_y‖²`, backpropagated through all T Euler steps |
-| **Inference** | `z_{k+1} = z_k + (1/T)·v(z_k, k/T)`, T ∈ {4, 12}, then cosine 1-NN on `z_T` |
-| **Field** | MLP 1025 → 512 → 512 → 1024, SiLU, scalar t concatenated, zero-initialised output |
-| **Protocol** | K ∈ {5, 10, full} × 3 seeds, reusing the Stage 1 subsets — **54 trained fields** |
+### Stage 3 — linear probe + FM (T = 12, paired Δ, `*` = Δ larger than 2σ)
 
-Headline: +26.6 points on DTD (0.4005 → 0.6668) and +17.5 points on FGVC-Aircraft
-(0.1545 → 0.3299) over the zero-shot baseline, with the encoder and the prototypes both frozen.
-Both come from rolled-out FM at T = 4, K = full.
+| Dataset / encoder | K | Best method | Accuracy | Δ vs probe |
+| --- | --- | --- | --- | --- |
+| Aircraft / ResNet-18 | full | Joint fine-tuning (extension) | 0.3772 ± 0.0046 | +0.0110 ± 0.0048 \* |
+| Aircraft / ResNet-18 | full | End-to-end rolled-out (frozen probe) | 0.3751 ± 0.0011 | +0.0089 ± 0.0023 \* |
+| Aircraft / ResNet-18 | 10 | Displacement-regularised rolled-out | — (probe 0.2720) | +0.0096 ± 0.0039 \* |
+| DTD / DINOv2 ViT-S/14 | 10 | Probe-weight target | — (probe 0.6952) | +0.0094 ± 0.0020 \* |
+| DTD / DINOv2 ViT-S/14 | full | — | 0.7637 ± 0.0083 | no method beats the probe |
 
-## Stage 3 — Flow Matching Before a Linear Probe
+**Takeaways**
 
-In Stage 3, we introduce a generative **Flow Matching (FM)** vector field $v_\theta(z, t)$ that acts as a trainable structural layer *before* a classification probe. Instead of mapping images directly to text prototypes, we use Flow Matching to physically reshape the embedding manifold, pulling same-class features together and pushing different classes apart. The transported embeddings are then classified by a frozen linear probe.
+- Stage 2 is the headline: **+26.6 points on DTD** and **+17.5 points on Aircraft** over
+  zero-shot CLIP, with the encoder and the text prototypes both frozen.
+- Stage 3 gains are small because at K = 10 the frozen probe sits at **100 % training accuracy**
+  — its cross-entropy gradient is numerically zero, so a flow initialised at the identity
+  correctly stays there. Quantifying this identity collapse is the stage's main contribution.
+- The prediction that follows is confirmed at K = full: the *same* objective that lost 0.0119 at
+  K = 10 gains **+0.0089** on Aircraft, a swing of +0.0208 driven purely by training-set size.
+- Overall, **the FM layer helps in proportion to the headroom the frozen classifier leaves** —
+  most on a weak encoder with plenty of data, not at all on a strong encoder already at its
+  linear ceiling (DTD / DINOv2 at 76 %).
 
-We evaluate three distinct mathematical objectives:
-- `standard`: A straight conditional-OT path from features to a target point.
-- `rolled_mse`: Backpropagating through the unrolled ODE solver to hit a geometric target.
-- `rolled_ce`: Backpropagating through the ODE solver and the frozen linear probe using classification Cross-Entropy.
+## Navigation
 
-For the geometric targets (`standard` and `rolled_mse`), we evaluate:
-- `centroids`: Class mean features.
-- `probe_weights`: Optimal classification directions from the linear probe.
-- `orthogonal`: Random maximally separated orthogonal vectors.
+- [Stage 1 — classification baselines](docs/stage1.md)
+- [Stage 2 — FM onto CLIP text prototypes](docs/stage2.md)
+- [Stage 3 — FM before a linear probe](docs/stage3.md)
 
-Detailed results and ablation analysis are documented in `docs/stage3.md`.
-
----
-
-## What is implemented
-
-```
-src/fmlayer/
-  data/
-    specs.py        Dataset registry: class counts, official split sizes, prompt templates,
-                    protocol kwargs (DTD partition=1, Aircraft annotation_level=variant),
-                    and data-root resolution.
-    datasets.py     torchvision wrappers, label/class-name access, and verify_split(), which
-                    asserts a materialised split matches the protocol.
-    class_names.py  Minimal, documented class-name normalisation and CLIP prompt building.
-    prepare.py      Entry point: download both datasets and verify all six splits.
-    fewshot.py      Balanced K-shot sampling with seeds {0,1,2}; indices persisted as .npy so
-                    every encoder trains on exactly the same images.
-
-  encoders/
-    base.py         Encoder ABC. Freezes the module (eval + requires_grad_(False)), binds it to
-                    its own eval preprocessing, validates the output width.
-    resnet18.py     torchvision IMAGENET1K_V1 with fc -> Identity, 512-d penultimate features.
-    dinov2.py       ViT-S/14 from torch.hub, final class token, official 224 eval transform.
-    clip_rn50.py    open_clip RN50/openai; image tower plus embed_texts() for prompts.
-    registry.py     build_encoder(), encoder/dataset pairing, the linear-probe cells.
-    check.py        Entry point: smoke-tests shapes, dtype and that zero parameters are trainable.
-
-  features/
-    cache.py        .npz cache paths, save/load, and a config hash covering encoder, dataset,
-                    split, embed dim, item count and the stringified transform, so stale caches
-                    are detected automatically.
-    extract.py      Entry point: one forward pass per split (shuffle=False keeps features aligned
-                    with labels), asserts counts against the official split sizes, and caches
-                    15 image files plus 2 CLIP text-prototype files. Each encoder is loaded once.
-
-  models/
-    prototypes.py   L2 normalisation, image prototypes = normalize(mean(normalize(z))),
-                    cosine similarity and nearest-prototype classification.
-    linear_probe.py nn.Linear(D, C), i.e. s = Wz + b, seeded initialisation.
-    zeroshot.py     Entry point: the zero-shot CLIP baseline.
-    flow_matching_clip.py
-                    Stage 2 velocity field (2 x 512 SiLU MLP, scalar t concatenated, zero-init
-                    output so the untrained field is the identity), the conditional-OT path and
-                    the optional endpoint cross-entropy helpers.
-    flow_ode.py     The brief's Euler rule as a differentiable rollout (shared by rolled-out
-                    training and inference), plus an arbitrary-time-grid integrator used for the
-                    diagnostic sweep and the reverse flow.
-    retrieval.py    Cosine nearest-neighbour lookup, used to render reverse-flow states.
-
-  train/
-    train_linear.py Entry point: AdamW (lr 1e-3, wd 1e-4), batch 64, up to 200 epochs, checkpoint
-                    selected by highest validation accuracy, then evaluated on the test split.
-                    Saves per-epoch histories and aggregates mean +/- std per setting.
-    train_flow_clip.py
-                    Entry point: trains the FM layer under either objective. AdamW (lr 1e-3
-                    cosine-annealed to 1e-5, wd 1e-4), batch 256, 1000 epochs, checkpoint
-                    selected by validation accuracy of the T-step rollout. Sweeps K x seeds x T
-                    and records one row per T.
-    evaluate.py     Top-1 accuracy, per-class accuracy, row-normalised confusion matrix.
-
-  viz/
-    accuracy.py     Accuracy vs K with error bars; zero-shot drawn as a horizontal reference line.
-    curves.py       Train/validation loss and validation accuracy, marking both the selected
-                    epoch and the minimum-validation-loss epoch.
-    confusion.py    Row-normalised confusion matrices for the probe and for zero-shot.
-    embeddings.py   PCA / t-SNE of test features with their prototypes, projection fitted jointly,
-                    fixed classes and colours so encoders are directly comparable.
-    flow_clip.py    Stage 2 figures: accuracy vs K per variant, training curves, the three-way
-                    feature comparison under one joint PCA, per-example flow trajectories, the
-                    accuracy-along-t diagnostic and the reverse-flow retrieval grid.
-    figures.py      Figure directory resolution and saving.
-
-  utils/
-    results.py      Tidy runs.csv. Re-running a run replaces its row instead of duplicating it.
-    seeding.py      Seeds Python, NumPy and torch.
-
-  report.py         Entry point: accuracy table (ordered K = 5, 10, full) plus every figure.
-  report_stage2.py  Entry point: Stage 2 table grouped by (dataset, objective, T, K) with mean,
-                    std and ΔAcc against the baseline, plus every Stage 2 figure.
-```
-
-Training runs on cached feature vectors held entirely in GPU memory, with batches cut by a
-seeded `randperm` rather than a `DataLoader`, so each of the 27 probe runs takes seconds. The
-54 Stage 2 fields train on the same cached vectors and take seconds to a couple of minutes each.
-
----
-
-## Running it
-
-All compute happens on **Google Colab**. The repository is cloned into a session, datasets are
-downloaded per session, and every step runs there. Datasets, cached features and results are
-never committed.
-
-- Stage 1: `notebooks/classifiers_baselines.ipynb` — downloads the datasets, extracts features,
-  trains and evaluates the linear probes and zero-shot baseline, and generates every figure.
-- Stage 2: `notebooks/stage2_flow_matching.ipynb` — needs only the cached `clip_rn50` features
-  and rebuilds them if they are missing, so it runs standalone. Regenerate it from
-  `tools/build_stage2_notebook.py` rather than editing the `.ipynb` by hand.
-
----
-
-## Outputs
-
-```
-<results>/runs.csv                  one row per run: method, dataset, encoder, K, seed, steps, accuracy
-<results>/accuracy_table.csv        mean +/- std per method/dataset/encoder/K
-<results>/flow_accuracy_table.csv   Stage 2: mean, std and ΔAcc per dataset/objective/T/K
-<results>/curves/*.json             per-epoch train loss, val loss, val accuracy
-<results>/flow_curves/*.json        Stage 2 per-run history, accuracies per T and diagnostic sweep
-<results>/flow_ckpt/*.pt            trained velocity fields, so figures need no retraining
-<results>/figures/*.png             accuracy vs K, loss curves, confusion matrices, embeddings
-<features>/<encoder>/*.npz          cached frozen-encoder features
-<features>/subsets/*.npy            persisted K-shot indices
-```
-
----
-
-## Conventions
-
-- Imports are absolute from the repository root: `from src.fmlayer.data.specs import get_spec`.
-- No CLI scripts and no YAML configs: settings are Python constants next to the code that uses
-  them, and each pipeline step exposes one entry-point function to call from a notebook cell.
+Code lives in `src/fmlayer/`, runnable pipelines in `notebooks/`, figures and tables in
+`results/`.
