@@ -539,7 +539,6 @@ def transported_metrics(
     return accuracy, nn.functional.cross_entropy(logits, labels).item()
 
 
-
 def train_flow(
     train_features: Tensor,
     train_labels: Tensor,

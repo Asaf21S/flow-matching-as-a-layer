@@ -185,4 +185,3 @@ def cosine_logits(
     normalized = nn.functional.normalize(features, dim=-1, eps=EPSILON)
     targets = nn.functional.normalize(prototypes, dim=-1, eps=EPSILON)
     return (normalized @ targets.T) / temperature
-

@@ -31,7 +31,6 @@ from src.fmlayer.train.train_fm import (
 TOLERANCE = 1e-4
 
 
-
 def make_probe(num_classes: int, embed_dim: int, seed: int, device: torch.device) -> nn.Linear:
     """Build a small randomly initialised probe for the checks."""
     torch.manual_seed(seed)
@@ -78,7 +77,8 @@ def check_margin_targets(device: torch.device) -> None:
     direction = true_weight - rival_weight
     norm = direction.norm(dim=1)
 
-    def signed_distance(points):
+    def signed_distance(points: torch.Tensor) -> torch.Tensor:
+        """Distance to the {true vs runner-up} boundary; negative means misclassified."""
         return ((points * direction).sum(dim=1) + true_bias - rival_bias) / norm
 
     before, after = signed_distance(features), signed_distance(targets)
@@ -285,6 +285,3 @@ def run_all_checks(device: torch.device | None = None) -> None:
     check_config_tags(device)
     check_rollout_penalty(device)
     print("All Stage 3 component checks passed.")
-
-
-

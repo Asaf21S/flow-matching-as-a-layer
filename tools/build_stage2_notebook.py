@@ -441,4 +441,3 @@ def write_notebook(path: Path | None = None) -> Path:
 if __name__ == "__main__":
     written = write_notebook()
     print(f"Wrote {written.relative_to(REPO_ROOT)}")
-

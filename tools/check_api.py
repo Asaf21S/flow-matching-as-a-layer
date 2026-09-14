@@ -105,7 +105,11 @@ def check_call(name, call, spec):
     return None
 
 
-def main():
+def main() -> int:
+    """Check every cross-module call in ``src`` against its definition.
+
+    Returns a process exit code: 1 if any mismatch was found, 0 otherwise.
+    """
     definitions = collect_definitions()
     problems = []
 

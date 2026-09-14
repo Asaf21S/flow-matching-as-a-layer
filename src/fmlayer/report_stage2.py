@@ -239,4 +239,3 @@ def make_stage2_report(
         "trajectory_figures": trajectory_figures,
         "retrieval_figures": retrieval_figures,
     }
-

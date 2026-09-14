@@ -115,7 +115,6 @@ def draw_training_curves(ax, history: list[dict], title: str) -> None:
     ax.set_title(title, pad=8)
 
 
-
 def draw_vector_field(
     ax,
     field: nn.Module,

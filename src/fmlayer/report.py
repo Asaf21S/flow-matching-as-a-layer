@@ -53,7 +53,6 @@ def accuracy_table(results_root: Path | None = None) -> pd.DataFrame:
     return table.drop(columns="k_order").reset_index(drop=True)
 
 
-
 def save_accuracy_table(
     table: pd.DataFrame, results_root: Path | None = None
 ) -> Path:

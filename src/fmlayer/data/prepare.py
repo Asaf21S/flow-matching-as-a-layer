@@ -69,4 +69,3 @@ def prepare_datasets(
         "root": str(root),
         "datasets": {name: prepare_dataset(name, root, download) for name in names},
     }
-

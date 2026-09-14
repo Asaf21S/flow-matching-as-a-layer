@@ -783,4 +783,3 @@ def summarize_flow_clip(results: dict) -> dict:
             f"delta {array.mean() - baselines[dataset]:+.4f}  (n={len(array)})"
         )
     return summary
-

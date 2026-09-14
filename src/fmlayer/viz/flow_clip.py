@@ -676,4 +676,3 @@ def plot_reverse_retrieval(
     return save_figure(
         fig, f"flow_reverse_{dataset}", figures_root, show=show, save=save
     )
-

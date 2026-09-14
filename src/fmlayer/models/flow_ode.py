@@ -34,7 +34,13 @@ def rollout(model: nn.Module, x_init: Tensor, steps: int) -> tuple[Tensor, Tenso
     states = [x_init]
     x = x_init
     for index in range(steps):
+        # Time is sampled at the *left* endpoint k/T, never (k+1)/T: that is what makes this
+        # explicit (forward) Euler, so each state depends only on the previous one and the
+        # unrolled graph stays a plain chain that backpropagation can walk.
         t = torch.full((x.shape[0],), index / steps, device=x.device, dtype=x.dtype)
+        # Step size is fixed at 1/T so the T steps span exactly t in [0, 1]; the velocity is
+        # therefore a displacement per unit time, not a per-step displacement, which keeps a
+        # field trained at one T usable at another.
         x = x + (1.0 / steps) * model(x=x, t=t)
         states.append(x)
     return x, torch.stack(states)

@@ -85,9 +85,13 @@ class MarginTargets:
 
             direction = true_weight - rival_weight
             norm = direction.norm(p=2, dim=1).clamp_min(EPSILON)
+            # gap / norm is the signed distance to the {true vs runner-up} boundary, so
+            # clamping the shortfall at zero is what leaves already-confident points fixed:
+            # they get a zero-length correction and the flow is trained to stay put there.
             gap = (source * direction).sum(dim=1) + (true_bias - rival_bias)
-            # Signed distance to the {true vs runner-up} boundary.
             shortfall = (self.margin_distance - gap / norm).clamp_min(0.0)
+            # Dividing by norm a second time converts the distance into the multiple of
+            # `direction` that travels it, since `direction` is not a unit vector.
             return source + (shortfall / norm).unsqueeze(1) * direction
 
 

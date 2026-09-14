@@ -238,4 +238,3 @@ def print_signal_diagnostics(frame: pd.DataFrame) -> None:
         "|grad|    = mean ||dCE_i/dz_i||, the only signal either strategy receives\n"
         "step/|z|  = relative distance one guided target step would move a feature"
     )
-
